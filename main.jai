@@ -103,9 +103,9 @@ main :: () {
 
             GetRect.slider(sliders_rect, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
 
-            // TODO: this should take into account cases when atan2 changes sign
-            // -pi |+------0--*>---|+ pi
-            rot_delta := clamp(to_rot - it.rot, -ROT_SPEED, ROT_SPEED);
+            rot_delta := to_rot - it.rot;
+            if rot_delta > PI || rot_delta < -PI rot_delta = -rot_delta;
+            rot_delta = clamp(rot_delta, -ROT_SPEED, ROT_SPEED);
 
             sliders_rect.y -= 20;
             GetRect.slider(sliders_rect, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
