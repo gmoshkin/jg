@@ -30,6 +30,15 @@ main :: () {
             }
         }
 
+        mouse : Vector2;
+        {
+            x, y, ok := get_mouse_pointer_position(window, true);
+            if ok {
+                mouse.x = xx x;
+                mouse.y = xx y;
+            }
+        }
+
         for Input.events_this_frame {
             if it.type == .QUIT then quit = true;
 
@@ -40,15 +49,10 @@ main :: () {
                 if it.key_pressed && it.key_code == .ESCAPE {
                     quit = true;
                 }
-            }
-        }
 
-        mouse : Vector2;
-        {
-            x, y, ok := get_mouse_pointer_position(window, true);
-            if ok {
-                mouse.x = xx x;
-                mouse.y = xx y;
+                if it.key_pressed && it.key_code == .F4 {
+                    debug_break();
+                }
             }
         }
 
@@ -56,15 +60,10 @@ main :: () {
         get_rect_theme := GetRect.default_theme_procs[GetRect.Default_Themes.Default]();
         GetRect.set_default_theme(get_rect_theme);
         r : GetRect.Rect;
+        r2 : GetRect.Rect;
 
         ////////////////////////////////////////////////////////////////
-        // Update
-        for * entities {
-            it.rot += ROT_SPEED;
-        }
-
-        ////////////////////////////////////////////////////////////////
-        // Draw
+        // Update/Draw
         Simp.update_window (window);
         Simp.clear_render_target (0.1, 0.1, 0.1, 1);
 
@@ -73,25 +72,25 @@ main :: () {
         r = GetRect.get_rect(10, xx (window_height - 40), 200, 20);
         GetRect.label(r, tprint("mouse: %", mouse), *get_rect_theme.label_theme);
 
-        for * entities {
-            using it;
+        r2 = GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
 
+        for * entities {
             {
                 light_gray := Vector4.{ 0.6, 0.6, 0.6, 1.0 };
                 Simp.set_shader_for_color();
-                len := distance(mouse, pos);
+                len := distance(mouse, it.pos);
                 thick := 1.0;
 
-                to_mouse := mouse - pos;
+                to_mouse := mouse - it.pos;
                 to_mouse_rot := atan2(to_mouse.y, to_mouse.x);
                 rot_m : Matrix2;
                 rot_m.v[0] = .{  sin(to_mouse_rot), cos(to_mouse_rot) };
                 rot_m.v[1] = .{ -cos(to_mouse_rot), sin(to_mouse_rot) };
 
-                top_l := (mouse + pos) / 2 + multiply(rot_m, .{ -thick, -len / 2 });
-                bot_l := (mouse + pos) / 2 + multiply(rot_m, .{ -thick, +len / 2 });
-                top_r := (mouse + pos) / 2 + multiply(rot_m, .{ +thick, -len / 2 });
-                bot_r := (mouse + pos) / 2 + multiply(rot_m, .{ +thick, +len / 2 });
+                top_l := (mouse + it.pos) / 2 + multiply(rot_m, .{ -thick, -len / 2 });
+                bot_l := (mouse + it.pos) / 2 + multiply(rot_m, .{ -thick, +len / 2 });
+                top_r := (mouse + it.pos) / 2 + multiply(rot_m, .{ +thick, -len / 2 });
+                bot_r := (mouse + it.pos) / 2 + multiply(rot_m, .{ +thick, +len / 2 });
 
                 Simp.immediate_quad(
                     top_l, bot_l, bot_r, top_r,
@@ -99,39 +98,33 @@ main :: () {
                 );
             }
 
-            to_mouse := mouse - pos;
+            to_mouse := mouse - it.pos;
             to_rot := atan2(to_mouse.y, to_mouse.x);
+
+            GetRect.slider(r2, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
+
             // TODO: this should take into account cases when atan2 changes sign
             // -pi |+------0--*>---|+ pi
-            rot_delta := to_rot - rot;
-            if rot_delta > ROT_SPEED rot_delta = ROT_SPEED;
-            // TODO: this is wrong and I'm too stupid to figure out why
-            //
-            // if rot_delta < -ROT_SPEED rot_delta = -ROT_SPEED;
-            // rot_delta := clamp(to_rot - rot, -ROT_SPEED, ROT_SPEED);
-            rot = rot + rot_delta;
-            // if rot > +PI  rot = fmod_cycling(rot + PI, 2*PI) - PI;
-            // if rot < -PI  rot = fmod_cycling(rot - PI, 2*PI) + PI;
+            rot_delta := clamp(to_rot - it.rot, -ROT_SPEED, ROT_SPEED);
 
-            r.y -= 20;
-            GetRect.label(r,
-                tprint("[%] to_rot: %", it_index, to_rot),
-                *get_rect_theme.label_theme);
+            r2.y -= 20;
+            GetRect.slider(r2, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
 
-            r.y -= 20;
-            GetRect.label(r,
-                tprint("[%] rot: %, delta: %", it_index, rot, rot_delta),
-                *get_rect_theme.label_theme);
+            it.rot = it.rot + rot_delta;
+            while it.rot > +PI  it.rot -= 2 * PI;
+            while it.rot < -PI  it.rot += 2 * PI;
 
+            r2.y -= 20;
+            GetRect.slider(r2, *it.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
 
             rot_m : Matrix2;
-            rot_m.v[0] = .{  sin(rot), cos(rot) };
-            rot_m.v[1] = .{ -cos(rot), sin(rot) };
+            rot_m.v[0] = .{  sin(it.rot), cos(it.rot) };
+            rot_m.v[1] = .{ -cos(it.rot), sin(it.rot) };
 
-            top_l := pos + multiply(rot_m, .{ - it.size.x / 2, - it.size.y / 2 });
-            top_r := pos + multiply(rot_m, .{ - it.size.x / 2, + it.size.y / 2 });
-            bot_l := pos + multiply(rot_m, .{ + it.size.x / 2, + it.size.y / 2 });
-            bot_r := pos + multiply(rot_m, .{ + it.size.x / 2, - it.size.y / 2 });
+            top_l := it.pos + multiply(rot_m, .{ - it.size.x / 2, - it.size.y / 2 });
+            top_r := it.pos + multiply(rot_m, .{ - it.size.x / 2, + it.size.y / 2 });
+            bot_l := it.pos + multiply(rot_m, .{ + it.size.x / 2, + it.size.y / 2 });
+            bot_r := it.pos + multiply(rot_m, .{ + it.size.x / 2, - it.size.y / 2 });
 
             Simp.set_shader_for_color();
             Simp.immediate_quad(
