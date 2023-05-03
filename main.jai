@@ -60,7 +60,7 @@ main :: () {
         get_rect_theme := GetRect.default_theme_procs[GetRect.Default_Themes.Default]();
         GetRect.set_default_theme(get_rect_theme);
         r : GetRect.Rect;
-        r2 : GetRect.Rect;
+        sliders_rect : GetRect.Rect;
 
         ////////////////////////////////////////////////////////////////
         // Update/Draw
@@ -72,7 +72,7 @@ main :: () {
         r = GetRect.get_rect(10, xx (window_height - 40), 200, 20);
         GetRect.label(r, tprint("mouse: %", mouse), *get_rect_theme.label_theme);
 
-        r2 = GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
+        sliders_rect = GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
 
         for * entities {
             {
@@ -101,37 +101,61 @@ main :: () {
             to_mouse := mouse - it.pos;
             to_rot := atan2(to_mouse.y, to_mouse.x);
 
-            GetRect.slider(r2, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
+            GetRect.slider(sliders_rect, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
 
             // TODO: this should take into account cases when atan2 changes sign
             // -pi |+------0--*>---|+ pi
             rot_delta := clamp(to_rot - it.rot, -ROT_SPEED, ROT_SPEED);
 
-            r2.y -= 20;
-            GetRect.slider(r2, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
+            sliders_rect.y -= 20;
+            GetRect.slider(sliders_rect, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
 
             it.rot = it.rot + rot_delta;
             while it.rot > +PI  it.rot -= 2 * PI;
             while it.rot < -PI  it.rot += 2 * PI;
 
-            r2.y -= 20;
-            GetRect.slider(r2, *it.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
+            sliders_rect.y -= 20;
+            GetRect.slider(sliders_rect, *it.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
 
             rot_m : Matrix2;
             rot_m.v[0] = .{  sin(it.rot), cos(it.rot) };
             rot_m.v[1] = .{ -cos(it.rot), sin(it.rot) };
+
+            /////////////////////////////////////////////////////////////////////////////////
+            // Draw it
+            Simp.set_shader_for_color();
 
             top_l := it.pos + multiply(rot_m, .{ - it.size.x / 2, - it.size.y / 2 });
             top_r := it.pos + multiply(rot_m, .{ - it.size.x / 2, + it.size.y / 2 });
             bot_l := it.pos + multiply(rot_m, .{ + it.size.x / 2, + it.size.y / 2 });
             bot_r := it.pos + multiply(rot_m, .{ + it.size.x / 2, - it.size.y / 2 });
 
-            Simp.set_shader_for_color();
             Simp.immediate_quad(
                 top_l, top_r, bot_l, bot_r,
                 it.color, it.color, it.color, it.color,
             );
 
+            // sliders_rect.y -= 20;
+            // GetRect.slider(sliders_rect, *ARROW.OFS, -2, +2, 4 / 100, *get_rect_theme.slider_theme, "ARROW.OFS ");
+            //
+            // sliders_rect.y -= 20;
+            // GetRect.slider(sliders_rect, *ARROW.LEN, -2, +2, 4 / 100, *get_rect_theme.slider_theme, "ARROW.LEN ");
+            //
+            // sliders_rect.y -= 20;
+            // GetRect.slider(sliders_rect, *ARROW.SPAN, -2, +2, 4 / 100, *get_rect_theme.slider_theme, "ARROW.SPAN ");
+
+            head_tip   := it.pos + multiply(rot_m, .{ 0, it.size.y * ARROW.OFS + it.size.y * ARROW.LEN });
+            head_left  := it.pos + multiply(rot_m, .{ -it.size.x * ARROW.SPAN / 2, it.size.y * ARROW.OFS });
+            head_right := it.pos + multiply(rot_m, .{ +it.size.x * ARROW.SPAN / 2, it.size.y * ARROW.OFS });
+
+            Simp.immediate_triangle(
+                .{ xy = head_tip },
+                .{ xy = head_left },
+                .{ xy = head_right },
+                it.color, it.color, it.color,
+            );
+
+            /////////////////////////////////////////////////////////////////////////////////
         }
 
         r = GetRect.get_rect(10, xx (window_height - 20), 200, 20);
@@ -143,6 +167,12 @@ main :: () {
         sleep_milliseconds(10);
     }
 }
+
+ARROW : struct {
+    OFS := .21;
+    LEN := .88;
+    SPAN := 1.69;
+};
 
 ROT_SPEED := .03;
 MOV_SPEED := 1;
