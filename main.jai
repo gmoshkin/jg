@@ -1,4 +1,7 @@
 main :: () {
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // parse command line arguments
     args := get_command_line_arguments();
     if args.count < 2 {
         log_error("expected a command 'client' or 'server'");
@@ -22,6 +25,10 @@ main :: () {
             exit(1);
     }
 
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Init connection
+    // TODO: move connection initialization into the game loop in a non blocking
+    // way, to support event handling in the midst...
     port : u16 = 2276;
     socket_init();
     conn_sock : Socket;
@@ -38,12 +45,13 @@ main :: () {
             exit(1);
         }
 
-        rc = listen(listen_sock, SOMAXCONN);
+        rc = listen(listen_sock, 1);
         if rc {
             log_error("`listen` failed: %", get_error_string(get_last_socket_error()));
             exit(1);
         }
 
+        log("waiting for a client on port %", port);
         conn_sock = accept(listen_sock, null, null);
         if conn_sock == INVALID_SOCKET {
             log_error("`accept` failed: %", get_error_string(get_last_socket_error()));
@@ -64,6 +72,7 @@ main :: () {
             exit(1);
         }
 
+        log("connecting to the server at %:%", server_address, port);
         rc = connect(conn_sock, addr.ai_addr, xx addr.ai_addrlen);
         if rc {
             log_error("`connect` failed: %", get_error_string(get_last_socket_error()));
@@ -71,14 +80,22 @@ main :: () {
         }
     }
 
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Create window
     window_width  : s32 = 860;
     window_height : s32 = 480;
     window := create_window(window_width, window_height, "jg");
     quit := false;
 
     Simp.set_render_target(window);
-    GetRect.ui_init();
 
+    // GetRect stuff
+    GetRect.ui_init();
+    get_rect_theme := GetRect.default_theme_procs[GetRect.Default_Themes.Default]();
+    GetRect.set_default_theme(get_rect_theme);
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Init game state
     entities[0] = .{
         pos = .{ window_width / 2.0 - 100, window_height / 2.0 },
         rot = 0,
@@ -93,21 +110,13 @@ main :: () {
     };
     assert(entities.count == 2, "TODO");
 
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Game loop
     while !quit {
         time := get_time();
-        ////////////////////////////////////////////////////////////////
-        // Input
-        Input.update_window_events();
 
-        for Input.get_window_resizes() {
-            Simp.update_window(it.window);
-
-            if it.window == window {
-                window_width  = it.width;
-                window_height = it.height;
-            }
-        }
-
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Network IO
         buf : [size_of(Entity)] u8;
 
         send_entity :: (conn_sock: Socket, entity: *Entity) -> quit := false {
@@ -150,6 +159,21 @@ main :: () {
             quit = send_entity(conn_sock, *entities[1]);
         }
 
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Handle input
+        Input.update_window_events();
+
+        for Input.get_window_resizes() {
+            Simp.update_window(it.window);
+
+            if it.window == window {
+                window_width  = it.width;
+                window_height = it.height;
+            }
+        }
+
+        // Read mouse before checking key presses so that debug_break() is
+        // called after we know mouse position.
         mouse : Vector2;
         {
             x, y, ok := get_mouse_pointer_position(window, true);
@@ -176,23 +200,14 @@ main :: () {
             }
         }
 
+        // GetRect stuff
         GetRect.ui_per_frame_update(window, window_width, window_height, time);
-        get_rect_theme := GetRect.default_theme_procs[GetRect.Default_Themes.Default]();
-        GetRect.set_default_theme(get_rect_theme);
-        r : GetRect.Rect;
-        sliders_rect : GetRect.Rect;
+        sliders_rect := GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
 
-        ////////////////////////////////////////////////////////////////
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update/Draw
-        Simp.update_window (window);
-        Simp.clear_render_target (0.1, 0.1, 0.1, 1);
-
-        Simp.set_shader_for_color();
-
-        r = GetRect.get_rect(10, xx (window_height - 40), 200, 20);
-        // GetRect.label(r, tprint("mouse: %", mouse), *get_rect_theme.label_theme);
-
-        sliders_rect = GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
+        Simp.update_window(window);
+        Simp.clear_render_target(0.1, 0.1, 0.1, 1);
 
         // {
         //     light_gray := Vector4.{ 0.6, 0.6, 0.6, 1.0 };
@@ -217,7 +232,8 @@ main :: () {
         //     );
         // }
 
-        // Update
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Update it
         it : *Entity;
         if am_server {
             it = *entities[0];
@@ -251,7 +267,7 @@ main :: () {
         it.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
 
         for * entities {
-            /////////////////////////////////////////////////////////////////////////////////
+            /////////////////////////////////////////////////////////////////////////////////////////////////////////////
             // Draw it
             Simp.set_shader_for_color();
 
@@ -288,17 +304,18 @@ main :: () {
                 .{ xy = head_right },
                 it.color, it.color, it.color,
             );
-
-            /////////////////////////////////////////////////////////////////////////////////
         }
 
-        r = GetRect.get_rect(10, xx (window_height - 20), 200, 20);
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Global variables debug editing
+        r := GetRect.get_rect(10, xx (window_height - 20), 200, 20);
         GetRect.slider(r, *ROT_SPEED, 0.0, 0.1, 0.005, *get_rect_theme.slider_theme, "ROT_SPEED ");
-        r.y -= 20;
 
+        r.y -= 20;
         GetRect.slider(r, *MOV_SPEED, 0.0, 10, 0.5, *get_rect_theme.slider_theme, "MOV_SPEED ");
-        r.y -= 20;
 
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Main loop end
         Simp.swap_buffers(window);
 
         reset_temporary_storage();
