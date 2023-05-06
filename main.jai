@@ -8,6 +8,7 @@ main :: () {
         exit(1);
     }
     am_server := false;
+    connecting := true;
     server_address : string;
     if args[1] == {
         case "server";
@@ -31,11 +32,16 @@ main :: () {
     // way, to support event handling in the midst...
     port : u16 = 2276;
     socket_init();
-    conn_sock : Socket;
+    server_addr : *addrinfo;
     if am_server {
-        listen_sock := socket(AF_INET, .SOCK_STREAM, .TCP);
+        listen_sock = socket(AF_INET, .SOCK_STREAM, .TCP);
         if listen_sock == INVALID_SOCKET {
             log_error("Failed creating a socket: %", get_error_string(get_last_socket_error()));
+            exit(1);
+        }
+
+        if !set_blocking(listen_sock, blocking = false) {
+            log_error("Failed setting socket to non blocking mode: %", get_error_string(get_last_socket_error()));
             exit(1);
         }
 
@@ -52,36 +58,47 @@ main :: () {
         }
 
         log("waiting for a client on port %", port);
-        conn_sock = accept(listen_sock, null, null);
-        if conn_sock == INVALID_SOCKET {
-            log_error("`accept` failed: %", get_error_string(get_last_socket_error()));
-            exit(1);
-        }
+        // conn_sock = accept(listen_sock, null, null);
+        // if conn_sock == INVALID_SOCKET {
+        //     log_error("`accept` failed: %", get_error_string(get_last_socket_error()));
+        //     exit(1);
+        // }
     } else {
-        addr : *addrinfo;
         hints := addrinfo.{ ai_family = AF_INET, ai_socktype = .SOCK_STREAM, ai_protocol = .TCP };
-        rc := getaddrinfo(to_c_string(server_address), tprint("%\0", port).data, *hints, *addr);
+        rc := getaddrinfo(to_c_string(server_address), tprint("%\0", port).data, *hints, *server_addr);
         if rc {
             log_error("`getaddrinfo` failed: %", get_error_string(get_last_socket_error()));
             exit(1);
         }
 
-        conn_sock = socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol);
+        conn_sock = socket(server_addr.ai_family, server_addr.ai_socktype, server_addr.ai_protocol);
         if conn_sock == INVALID_SOCKET {
             log_error("Failed creating a socket: %", get_error_string(get_last_socket_error()));
             exit(1);
         }
 
-        log("connecting to the server at %:%", server_address, port);
-        rc = connect(conn_sock, addr.ai_addr, xx addr.ai_addrlen);
-        if rc {
-            log_error("`connect` failed: %", get_error_string(get_last_socket_error()));
+        if !set_blocking(conn_sock, blocking = false) {
+            log_error("Failed setting socket to non blocking mode: %", get_error_string(get_last_socket_error()));
             exit(1);
         }
+
+        log("connecting to the server at %:%", server_address, port);
+        // rc = connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
+        // if rc {
+        //     log_error("`connect` failed: %", get_error_string(get_last_socket_error()));
+        //     exit(1);
+        // }
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Create window
+    #if OS == .WINDOWS {
+        Windows :: #import "Windows";
+        Windows.SetProcessDPIAware();
+        // Windows is very bad at thread-switching by default unless you do this. Sad.
+        Windows.timeBeginPeriod(1);
+    }
+
     window_width  : s32 = 860;
     window_height : s32 = 480;
     window := create_window(window_width, window_height, "jg");
@@ -114,50 +131,6 @@ main :: () {
     // Game loop
     while !quit {
         time := get_time();
-
-        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        // Network IO
-        buf : [size_of(Entity)] u8;
-
-        send_entity :: (conn_sock: Socket, entity: *Entity) -> quit := false {
-            buf : [size_of(Entity)] u8;
-            << cast(*Entity) buf.data = << entity;
-            n_bytes_sent := 0;
-            while n_bytes_sent != buf.count {
-                rc := send(conn_sock, buf.data + n_bytes_sent, xx (buf.count - n_bytes_sent), 0);
-                if rc < 0 {
-                    err := get_last_socket_error();
-                    log_error("Failed sending to socket: %", get_error_string(err));
-                    return quit = true;
-                }
-                n_bytes_sent += rc;
-            }
-            return;
-        }
-
-        recv_entity :: (conn_sock: Socket, entity: *Entity) -> quit := false {
-            buf : [size_of(Entity)] u8;
-            n_bytes_read := 0;
-            while n_bytes_read != buf.count {
-                rc := recv(conn_sock, buf.data + n_bytes_read, xx (buf.count - n_bytes_read), 0);
-                if rc < 0 {
-                    err := get_last_socket_error();
-                    log_error("Failed receiving from socket: %", get_error_string(err));
-                    return quit = true;
-                }
-                n_bytes_read += rc;
-            }
-            << entity = << cast(*Entity) buf.data;
-            return;
-        }
-
-        if am_server {
-            quit = send_entity(conn_sock, *entities[0]);
-            quit = recv_entity(conn_sock, *entities[1]);
-        } else {
-            quit = recv_entity(conn_sock, *entities[0]);
-            quit = send_entity(conn_sock, *entities[1]);
-        }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Handle input
@@ -235,10 +208,13 @@ main :: () {
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update it
         it : *Entity;
+        adversary : *Entity;
         if am_server {
             it = *entities[0];
+            adversary = *entities[1];
         } else {
             it = *entities[1];
+            adversary = *entities[0];
         }
         to_mouse := mouse - it.pos;
         to_rot := atan2(to_mouse.y, to_mouse.x);
@@ -266,9 +242,24 @@ main :: () {
 
         it.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
 
+        next_to_send.mouse = mouse;
+        next_to_send.entity = << it;
+
+        << adversary = last_received.entity;
+        adversary_mouse := last_received.mouse;
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Draw
+        Simp.set_shader_for_color();
+        Simp.immediate_quad(
+            adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
+            adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
+            adversary_mouse + .{ +ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
+            adversary_mouse + .{ +ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
+            ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color,
+        );
+
         for * entities {
-            /////////////////////////////////////////////////////////////////////////////////////////////////////////////
-            // Draw it
             Simp.set_shader_for_color();
 
             rot_m : Matrix2;
@@ -318,15 +309,150 @@ main :: () {
         // Main loop end
         Simp.swap_buffers(window);
 
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Network IO
+        // TODO: this actually takes a lot of time, probably best not to do it every frame
+        if connecting {
+            if am_server {
+                // TODO: .VERY_VERBOSE_ONLY doesn't seem to do what I expected, gotta go investigate
+                // log("checking if somebody connected...", flags = .VERY_VERBOSE_ONLY);
+                conn_sock = accept(listen_sock, null, null);
+                if conn_sock == INVALID_SOCKET {
+                    err := get_last_socket_error();
+                    if err != SOCKET_WOULDBLOCK  log_error("`accept` failed: #% %", err, get_error_string(err));
+                    // log("no connection yet", flags = .VERY_VERBOSE_ONLY);
+                } else {
+                    log("got a connection", flags = .VERY_VERBOSE_ONLY);
+                    connecting = false;
+                }
+            } else /* am_client */ {
+                rc := connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
+                if rc {
+                    err := get_last_socket_error();
+                    if err != SOCKET_WOULDBLOCK {
+                        #if OS == .WINDOWS {
+                            // XXX: am I doing something wrong, or why would we get here?
+                            if err == WSAEISCONN  connecting = false;
+                        }
+                        if connecting  log_error("`connect` failed: #% %", err, get_error_string(err));
+                    }
+                } else {
+                    connecting = false;
+                }
+            }
+        }
+
+        send_pending_packet :: (disconnected: *bool) {
+            data := (cast(*u8) *partially_sent.data) + partially_sent.size;
+            size := packet_size - partially_sent.size;
+            rc := send(conn_sock, data, xx size, 0);
+            if rc < 0 {
+                err := get_last_socket_error();
+                if err != SOCKET_WOULDBLOCK  {
+                    log_error("Failed sending to socket: #% %", err, get_error_string(err));
+                    #if OS == .WINDOWS {
+                        <<disconnected = (err == WSAECONNRESET);
+                    }
+                }
+                return;
+            }
+
+            partially_sent.size += xx rc;
+            if partially_sent.size == packet_size {
+                // fully sent
+                partially_sent.size = 0;
+                partially_sent.data = next_to_send;
+            }
+        }
+
+        // FIXME: copypaste
+        receive_pending_packet :: (disconnected: *bool) {
+            data := (cast(*u8) *partially_received.data) + partially_received.size;
+            size := packet_size - partially_received.size;
+            rc := recv(conn_sock, data, xx size, 0);
+            if rc < 0 {
+                err := get_last_socket_error();
+                if err != SOCKET_WOULDBLOCK  {
+                    log_error("Failed receiving from socket: #% %", err, get_error_string(err));
+                    #if OS == .WINDOWS {
+                        <<disconnected = (err == WSAECONNRESET);
+                    }
+                }
+                return;
+            }
+
+            partially_received.size += xx rc;
+            if partially_received.size == packet_size {
+                // fully received
+                partially_received.size = 0;
+                last_received = partially_received.data;
+            }
+        }
+
+        if !connecting {
+            if am_server {
+                disconnected := false;
+                if  partially_sent.size  send_pending_packet(*disconnected);
+                // Maybe sent the last pending packet, try sending the new one
+                if !partially_sent.size  send_pending_packet(*disconnected);
+
+                if  partially_received.size  receive_pending_packet(*disconnected);
+                // Maybe received the last packet, try receiving another one
+                if !partially_received.size  receive_pending_packet(*disconnected);
+                if disconnected {
+                    log_error("lost connection to client, will listen for more connections...");
+                    connecting = true;
+                }
+            } else /* am_client */ {
+                // XXX: this is just copy paste for now but will there ever be
+                // something different?
+                disconnected := false;
+                if  partially_sent.size  send_pending_packet(*disconnected);
+                // Maybe sent the last pending packet, try sending the new one
+                if !partially_sent.size  send_pending_packet(*disconnected);
+
+                if  partially_received.size  receive_pending_packet(*disconnected);
+                // Maybe received the last packet, try receiving another one
+                if !partially_received.size  receive_pending_packet(*disconnected);
+
+                if disconnected {
+                    log_error("lost connection to server, will retry connecting...");
+                    // TODO: the socket should be closed and reinitialized
+                    connecting = true;
+                }
+            }
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // End of frame
         reset_temporary_storage();
-        sleep_milliseconds(10);
+
+        time_end := get_time();
+        millis_spent_on_frame := 1000 * (time_end - time);
+        millis_expected_to_spend := 1000 / 60;
+        millis_left_to_sleep := millis_expected_to_spend - millis_spent_on_frame;
+        if millis_left_to_sleep > 0 {
+            // log("going to sleep for %", millis_left_to_sleep, flags = .VERY_VERBOSE_ONLY);
+            sleep_milliseconds(xx millis_left_to_sleep);
+        } else {
+            // log("we're running late, not gonna sleep tonight", flags = .VERY_VERBOSE_ONLY);
+        }
     }
 }
 
+TARGET_FPS := 60;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Entity stuff
 ARROW : struct {
     OFS := .21;
     LEN := .88;
     SPAN := 1.69;
+};
+
+ADVERSARY_MOUSE : struct {
+    size := 5.0;
+    color := Vector4.{ 0.3, 0.3, 0.3, 1.0 };
 };
 
 ROT_SPEED := .03;
@@ -342,8 +468,37 @@ Entity :: struct {
     color: Vector4;
 };
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Network stuff
+conn_sock : Socket;
+listen_sock : Socket;
+
+partially_sent     : Network_Packet_Piece;
+next_to_send       : Network_Packet;
+partially_received : Network_Packet_Piece;
+last_received      : Network_Packet;
+
+packet_size :: size_of(Network_Packet);
+Network_Packet :: struct {
+    header : [8] u8 = xx "packet[[";
+    mouse: Vector2;
+    entity: Entity;
+    footer : [8] u8 = xx "]]tekcap";
+}
+Network_Packet_Piece :: struct {
+    data: Network_Packet;
+    size: s32;
+}
+
 f32 :: float32;
 f64 :: float64;
+
+array_equals :: (lhs: [$N] $T, rhs: [N] T) -> bool {
+    for lhs {
+        if rhs[it_index] != it return false;
+    }
+    return true;
+}
 
 #import "Basic";
 #import "Math";
