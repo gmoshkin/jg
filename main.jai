@@ -331,11 +331,13 @@ main :: () {
                 if rc {
                     err := get_last_socket_error();
                     if err != SOCKET_WOULDBLOCK {
+                        ignore := false;
                         #if OS == .WINDOWS {
                             // XXX: am I doing something wrong, or why would we get here?
-                            if err == WSAEISCONN  connecting = false;
+                            if err == WSAEISCONN   connecting = false;
+                            if err == WSAEALREADY  ignore = true;
                         }
-                        if connecting  log_error("`connect` failed: #% %", err, get_error_string(err));
+                        if connecting && !ignore  log_error("`connect` failed: #% %", err, get_error_string(err));
                     }
                 } else {
                     connecting = false;
@@ -408,6 +410,7 @@ main :: () {
                         last_packet_sent_time = time;
             }
 
+            // TODO: read all pending packets
             if  partially_received.size  receive_pending_packet(*disconnected);
             // Maybe received the last packet, try receiving another one
             if !partially_received.size  receive_pending_packet(*disconnected);
