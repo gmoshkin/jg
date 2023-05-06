@@ -34,6 +34,7 @@ main :: () {
     socket_init();
     server_addr : *addrinfo;
     if am_server {
+        // XXX: maybe use UDP, cause TCP seems to be too slow
         listen_sock = socket(AF_INET, .SOCK_STREAM, .TCP);
         if listen_sock == INVALID_SOCKET {
             log_error("Failed creating a socket: %", get_error_string(get_last_socket_error()));
@@ -130,7 +131,7 @@ main :: () {
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Game loop
     while !quit {
-        time := get_time();
+        time_start := get_time();
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Handle input
@@ -174,7 +175,7 @@ main :: () {
         }
 
         // GetRect stuff
-        GetRect.ui_per_frame_update(window, window_width, window_height, time);
+        GetRect.ui_per_frame_update(window, window_width, window_height, time_start);
         sliders_rect := GetRect.get_rect(xx (window_width - 240), xx (window_height - 30), 200, 20);
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -342,7 +343,7 @@ main :: () {
             }
         }
 
-        send_pending_packet :: (disconnected: *bool) {
+        send_pending_packet :: (disconnected: *bool) -> fully_sent := false {
             data := (cast(*u8) *partially_sent.data) + partially_sent.size;
             size := packet_size - partially_sent.size;
             rc := send(conn_sock, data, xx size, 0);
@@ -362,7 +363,10 @@ main :: () {
                 // fully sent
                 partially_sent.size = 0;
                 partially_sent.data = next_to_send;
+                return fully_sent = true;
             }
+
+            return;
         }
 
         // FIXME: copypaste
@@ -390,36 +394,32 @@ main :: () {
         }
 
         if !connecting {
-            if am_server {
-                disconnected := false;
-                if  partially_sent.size  send_pending_packet(*disconnected);
-                // Maybe sent the last pending packet, try sending the new one
-                if !partially_sent.size  send_pending_packet(*disconnected);
+            time := get_time();
+            disconnected := false;
 
-                if  partially_received.size  receive_pending_packet(*disconnected);
-                // Maybe received the last packet, try receiving another one
-                if !partially_received.size  receive_pending_packet(*disconnected);
-                if disconnected {
+            if partially_sent.size {
+                if send_pending_packet(*disconnected)
+                    last_packet_sent_time = time;
+            }
+            // Maybe sent the last pending packet, try sending the new one
+            if !partially_sent.size {
+                if time > last_packet_sent_time + 1 / cast(float) packets_sent_per_second
+                    if send_pending_packet(*disconnected)
+                        last_packet_sent_time = time;
+            }
+
+            if  partially_received.size  receive_pending_packet(*disconnected);
+            // Maybe received the last packet, try receiving another one
+            if !partially_received.size  receive_pending_packet(*disconnected);
+            if disconnected {
+                if am_server {
                     log_error("lost connection to client, will listen for more connections...");
-                    connecting = true;
-                }
-            } else /* am_client */ {
-                // XXX: this is just copy paste for now but will there ever be
-                // something different?
-                disconnected := false;
-                if  partially_sent.size  send_pending_packet(*disconnected);
-                // Maybe sent the last pending packet, try sending the new one
-                if !partially_sent.size  send_pending_packet(*disconnected);
-
-                if  partially_received.size  receive_pending_packet(*disconnected);
-                // Maybe received the last packet, try receiving another one
-                if !partially_received.size  receive_pending_packet(*disconnected);
-
-                if disconnected {
+                } else /* am_client */ {
                     log_error("lost connection to server, will retry connecting...");
                     // TODO: the socket should be closed and reinitialized
-                    connecting = true;
+
                 }
+                connecting = true;
             }
         }
 
@@ -428,7 +428,7 @@ main :: () {
         reset_temporary_storage();
 
         time_end := get_time();
-        millis_spent_on_frame := 1000 * (time_end - time);
+        millis_spent_on_frame := 1000 * (time_end - time_start);
         millis_expected_to_spend := 1000 / 60;
         millis_left_to_sleep := millis_expected_to_spend - millis_spent_on_frame;
         if millis_left_to_sleep > 0 {
@@ -472,6 +472,9 @@ Entity :: struct {
 // Network stuff
 conn_sock : Socket;
 listen_sock : Socket;
+
+packets_sent_per_second := 30;
+last_packet_sent_time : f64 = 0.0;
 
 partially_sent     : Network_Packet_Piece;
 next_to_send       : Network_Packet;
