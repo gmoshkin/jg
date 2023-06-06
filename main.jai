@@ -244,9 +244,9 @@ main :: () {
         it.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
 
         next_to_send.mouse = mouse;
-        next_to_send.entity = << it;
+        next_to_send.entity = it.*;
 
-        << adversary = last_received.entity;
+        adversary.* = last_received.entity;
         adversary_mouse := last_received.mouse;
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -354,7 +354,7 @@ main :: () {
                 if err != SOCKET_WOULDBLOCK  {
                     log_error("Failed sending to socket: #% %", err, get_error_string(err));
                     #if OS == .WINDOWS {
-                        <<disconnected = (err == WSAECONNRESET);
+                        disconnected.* = (err == WSAECONNRESET);
                     }
                 }
                 return;
@@ -381,7 +381,7 @@ main :: () {
                 if err != SOCKET_WOULDBLOCK  {
                     log_error("Failed receiving from socket: #% %", err, get_error_string(err));
                     #if OS == .WINDOWS {
-                        <<disconnected = (err == WSAECONNRESET);
+                        disconnected.* = (err == WSAECONNRESET);
                     }
                 }
                 return;
