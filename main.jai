@@ -458,8 +458,8 @@ ADVERSARY_MOUSE : struct {
     color := Vector4.{ 0.3, 0.3, 0.3, 1.0 };
 };
 
-ROT_SPEED := .03;
-MOV_SPEED := 1.0;
+ROT_SPEED := .1;
+MOV_SPEED := 4.8;
 
 N_ENTITIES :: 2;
 entities : [N_ENTITIES] Entity;
