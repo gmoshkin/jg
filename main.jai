@@ -119,12 +119,14 @@ main :: () {
         rot = 0,
         size = .{ 10, 20 },
         color = .{ 1, 0, 0, 1 },
+        is_enabled = am_server,
     };
     entities[1] = .{
         pos = .{ window_width / 2.0 + 100, window_height / 2.0 },
         rot = 0,
         size = .{ 10, 20 },
         color = .{ 0, 0, 1, 1 },
+        is_enabled = !am_server,
     };
     assert(entities.count == 2, "TODO");
 
@@ -208,50 +210,106 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update it
-        it : *Entity;
+        my_ship : *Entity;
         adversary : *Entity;
         if am_server {
-            it = *entities[0];
+            my_ship = *entities[0];
             adversary = *entities[1];
         } else {
-            it = *entities[1];
+            my_ship = *entities[1];
             adversary = *entities[0];
         }
-        to_mouse := mouse - it.pos;
+        to_mouse := mouse - my_ship.pos;
         to_rot := atan2(to_mouse.y, to_mouse.x);
 
         GetRect.slider(sliders_rect, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
         sliders_rect.y -= 20;
 
-        rot_delta := to_rot - it.rot;
+        rot_delta := to_rot - my_ship.rot;
         if rot_delta > PI || rot_delta < -PI rot_delta = -rot_delta;
         rot_delta = clamp(rot_delta, -ROT_SPEED, ROT_SPEED);
 
         GetRect.slider(sliders_rect, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
         sliders_rect.y -= 20;
 
-        it.rot = it.rot + rot_delta;
-        while it.rot > +PI  it.rot -= 2 * PI;
-        while it.rot < -PI  it.rot += 2 * PI;
+        my_ship.rot = my_ship.rot + rot_delta;
+        while my_ship.rot > +PI  my_ship.rot -= 2 * PI;
+        while my_ship.rot < -PI  my_ship.rot += 2 * PI;
 
-        GetRect.slider(sliders_rect, *it.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
+        GetRect.slider(sliders_rect, *my_ship.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
         sliders_rect.y -= 20;
 
-        rot_m : Matrix2;
-        rot_m.v[0] = .{  sin(it.rot), cos(it.rot) };
-        rot_m.v[1] = .{ -cos(it.rot), sin(it.rot) };
+        {
+            rot_m : Matrix2;
+            rot_m.v[0] = .{  sin(my_ship.rot), cos(my_ship.rot) };
+            rot_m.v[1] = .{ -cos(my_ship.rot), sin(my_ship.rot) };
 
-        it.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
+            my_ship.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
+        }
 
         next_to_send.mouse = mouse;
-        next_to_send.entity = it.*;
+        next_to_send.entity = my_ship.*;
 
         adversary.* = last_received.entity;
         adversary_mouse := last_received.mouse;
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Update circle waves
+
+        for * circle_waves {
+            if !it.is_enabled continue;
+
+            it.outer_radius += RADIUS_DELTA;
+            if it.outer_radius > MAX_RADIUS {
+                it.is_enabled = false;
+            }
+
+            it.color.w *= FADE_AWAY_FACTOR;
+        }
+
+        time_now := get_time();
+        if time_now - time_when_last_circle_wave_spawned > TIME_BETWEEN_CIRCLE_WAVE_SPAWNS {
+
+            for * entities {
+                // TODO: send wave data over network also
+                if !it.is_enabled continue;
+                circle_waves[current_circle_wave_index] = circle_wave(it.pos, is_enabled=true);
+                current_circle_wave_index += 1;
+                if current_circle_wave_index >= circle_waves.count then current_circle_wave_index = 0;
+            }
+
+            time_when_last_circle_wave_spawned = time_now;
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Draw
-        Simp.set_shader_for_color();
+        Simp.set_shader_for_color(enable_blend = true);
+
+        // Circle waves
+        {
+            N :: 32;
+            rot_m : [N] Matrix2 : #run -> [N] Matrix2 {
+                rot_m : [N] Matrix2;
+                for k: 0..N-1 {
+                    rot_m[k].v[0] = .{  sin(k * TAU / N), cos(k * TAU / N) };
+                    rot_m[k].v[1] = .{ -cos(k * TAU / N), sin(k * TAU / N) };
+                }
+                return rot_m;
+            };
+
+            for k: 0..N-1 for * circle_waves {
+                if !it.is_enabled continue;
+                top_l := it.origin + multiply(rot_m[k],         .{ 0, it.outer_radius });
+                bot_l := it.origin + multiply(rot_m[k],         .{ 0, it.outer_radius - it.width });
+                top_r := it.origin + multiply(rot_m[(k + 1) % N], .{ 0, it.outer_radius });
+                bot_r := it.origin + multiply(rot_m[(k + 1) % N], .{ 0, it.outer_radius - it.width });
+                Simp.immediate_quad(
+                    top_l, top_r, bot_r, bot_l,
+                    it.color, it.color, it.color, it.color,
+                );
+            }
+        }
+
         Simp.immediate_quad(
             adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
             adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
@@ -305,6 +363,18 @@ main :: () {
 
         r.y -= 20;
         GetRect.slider(r, *MOV_SPEED, 0.0, 10, 0.5, *get_rect_theme.slider_theme, "MOV_SPEED ");
+
+        r.y -= 20;
+        GetRect.slider(r, *MAX_RADIUS, 0.0, 500, 10.0, *get_rect_theme.slider_theme, "MAX_RADIUS ");
+
+        r.y -= 20;
+        GetRect.slider(r, *RADIUS_DELTA, 0.0, 20, 1.0, *get_rect_theme.slider_theme, "RADIUS_DELTA ");
+
+        r.y -= 20;
+        GetRect.slider(r, *FADE_AWAY_FACTOR, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "FADE_AWAY_FACTOR ");
+
+        r.y -= 20;
+        GetRect.slider(r, *TIME_BETWEEN_CIRCLE_WAVE_SPAWNS, 0.0, 4, 0.2, *get_rect_theme.slider_theme, "TIME_BETWEEN_CIRCLE_WAVE_SPAWNS ");
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Main loop end
@@ -392,6 +462,7 @@ main :: () {
                 // fully received
                 partially_received.size = 0;
                 last_received = partially_received.data;
+                last_received.entity.is_enabled = true;
             }
         }
 
@@ -469,7 +540,39 @@ Entity :: struct {
     rot: f32;
     size: Vector2;
     color: Vector4;
+    is_enabled: bool;
 };
+
+CircleWave :: struct {
+    origin: Vector2;
+    outer_radius: f32;
+    color: Vector4;
+    width: f32;
+    is_enabled: bool = false;
+};
+
+circle_wave :: inline (origin: Vector2, is_enabled: bool = true) -> CircleWave {
+    return .{
+        origin = origin,
+        is_enabled = is_enabled,
+        outer_radius = INITIAL_OUTER_RADIUS,
+        color = WAVE_COLOR,
+        width = WAVE_WIDTH,
+    };
+}
+
+N_CIRCLE_WAVES :: 1024;
+circle_waves : [N_CIRCLE_WAVES] CircleWave;
+current_circle_wave_index : int = 0;
+time_when_last_circle_wave_spawned : f64;
+
+TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.1;
+MAX_RADIUS := 400.;
+RADIUS_DELTA := 1.;
+FADE_AWAY_FACTOR := 0.97;
+INITIAL_OUTER_RADIUS := 10.;
+WAVE_WIDTH : f32 = 10.;
+WAVE_COLOR := Vector4.{ 0.1, 0.4, 0.8, 1.0 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Network stuff
@@ -505,6 +608,53 @@ array_equals :: (lhs: [$N] $T, rhs: [N] T) -> bool {
     }
     return true;
 }
+
+hsv_to_rgb :: (cx: float, cy: float, cz: float) -> (r: float, g: float, b: float) {
+    cx /= 360.0;
+    p: Vector3;
+    p.x = abs(fract(cx + 1)     * 6 - 3) - 1;
+    p.y = abs(fract(cx + 2/3.0) * 6 - 3) - 1;
+    p.z = abs(fract(cx + 1/3.0) * 6 - 3) - 1;
+
+    Clamp(*p.x, 0, 1);
+    Clamp(*p.y, 0, 1);
+    Clamp(*p.z, 0, 1);
+
+    p.x = lerp(1, p.x, cy);
+    p.y = lerp(1, p.y, cy);
+    p.z = lerp(1, p.z, cy);
+    
+    return cz * p.x, cz * p.y, cz * p.z;
+}
+
+rgb_to_hsv :: (r: float, g: float, b: float) -> (h: float, s: float, v: float) {
+    rgb_min := min(r, g, b);
+    rgb_max := max(r, g, b);
+
+    if rgb_max == 0  return 0, 0, 0;
+
+    v := rgb_max;
+
+    delta := rgb_max - rgb_min;
+    
+    s := delta / rgb_max;
+    if s == 0 {  // This covers the case when rgb_max == rgb_min, so we don't worry about dividing by 0 below.
+        return 0, 0, v;
+    }
+
+    h: float = ---;
+    K :: (43/255.0);
+    if rgb_max == r
+        h = 0 + K * (g - b) / delta;
+    else if rgb_max == g
+        h = (85/255.0) + K * (b - r) / delta;
+    else
+        h = (171/255.0) + K * (r - g) / delta;
+
+    return h*360, s, v;
+}
+
+fract :: inline (x: float) -> float { return x - floor(x); }
 
 #import "Basic";
 #import "Math";
