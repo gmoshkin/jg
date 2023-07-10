@@ -119,6 +119,7 @@ main :: () {
         rot = 0,
         size = .{ 10, 20 },
         color = .{ 1, 0, 0, 1 },
+        wave_color = .{ 0.8, 0.4, 0.1, 1.0 },
         is_enabled = am_server,
     };
     entities[1] = .{
@@ -126,6 +127,7 @@ main :: () {
         rot = 0,
         size = .{ 10, 20 },
         color = .{ 0, 0, 1, 1 },
+        wave_color = .{ 0.1, 0.4, 0.8, 1.0 },
         is_enabled = !am_server,
     };
     assert(entities.count == 2, "TODO");
@@ -171,7 +173,7 @@ main :: () {
                 }
 
                 if it.key_pressed && it.key_code == .F4 {
-                    debug_break();
+                    do_debug_break();
                 }
             }
         }
@@ -210,48 +212,57 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update it
-        my_ship : *Entity;
-        adversary : *Entity;
+        mouses : [entities.count] Vector2;
+        my_index : int;
+        their_index : int;
         if am_server {
-            my_ship = *entities[0];
-            adversary = *entities[1];
+            my_index = 0; their_index = 1;
         } else {
-            my_ship = *entities[1];
-            adversary = *entities[0];
+            my_index = 1; their_index = 0;
         }
-        to_mouse := mouse - my_ship.pos;
-        to_rot := atan2(to_mouse.y, to_mouse.x);
+        mouses[my_index] = mouse;
+        if remote_data_received {
+            mouses[their_index] = last_received.mouse;
+        } else {
+            // TODO: simulate
+        }
 
-        GetRect.slider(sliders_rect, *to_rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "to_rot ");
-        sliders_rect.y -= 20;
+        // TODO: factor this into a loop where each ship is targetting it's
+        // corresponding mouse. Our mouse is just `mouse`, their mouse is
+        // 1. If not connected yet, do the random mouse movements simulation
+        // 2. If connected, do last mouse position or maybe extrapolate mouse
+        // movements. We can extrapolate linearly or maybe something better?
+        for * entities {
+            to_mouse := mouses[it_index] - it.pos;
+            to_rot := atan2(to_mouse.y, to_mouse.x);
 
-        rot_delta := to_rot - my_ship.rot;
-        if rot_delta > PI || rot_delta < -PI rot_delta = -rot_delta;
-        rot_delta = clamp(rot_delta, -ROT_SPEED, ROT_SPEED);
+            rot_delta := to_rot - it.rot;
+            if rot_delta > PI || rot_delta < -PI rot_delta = -rot_delta;
+            rot_delta = clamp(rot_delta, -ROT_SPEED, ROT_SPEED);
 
-        GetRect.slider(sliders_rect, *rot_delta, -ROT_SPEED, ROT_SPEED, PI / 9, *get_rect_theme.slider_theme, "delta clamped ");
-        sliders_rect.y -= 20;
+            it.rot = it.rot + rot_delta;
+            while it.rot > +PI  it.rot -= 2 * PI;
+            while it.rot < -PI  it.rot += 2 * PI;
 
-        my_ship.rot = my_ship.rot + rot_delta;
-        while my_ship.rot > +PI  my_ship.rot -= 2 * PI;
-        while my_ship.rot < -PI  my_ship.rot += 2 * PI;
-
-        GetRect.slider(sliders_rect, *my_ship.rot, -PI, PI, PI / 9, *get_rect_theme.slider_theme, "rot ");
-        sliders_rect.y -= 20;
-
-        {
             rot_m : Matrix2;
-            rot_m.v[0] = .{  sin(my_ship.rot), cos(my_ship.rot) };
-            rot_m.v[1] = .{ -cos(my_ship.rot), sin(my_ship.rot) };
+            rot_m.v[0] = .{  sin(it.rot), cos(it.rot) };
+            rot_m.v[1] = .{ -cos(it.rot), sin(it.rot) };
 
-            my_ship.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
+            it.pos += MOV_SPEED * multiply(rot_m, .{ 0, 1 });
         }
 
-        next_to_send.mouse = mouse;
-        next_to_send.entity = my_ship.*;
+        // DEBUG
+        if Input.input_button_states[#char "0"] == .DOWN {
+            entities[my_index].pos = .{ xx (window_width / 2), xx (window_height / 2) };
+        }
 
-        adversary.* = last_received.entity;
-        adversary_mouse := last_received.mouse;
+        next_to_send.mouse = mouses[my_index];
+        next_to_send.entity = entities[my_index];
+
+        if remote_data_received {
+            // Override the data we just simulated
+            entities[their_index] = last_received.entity;
+        }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update circle waves
@@ -273,12 +284,46 @@ main :: () {
             for * entities {
                 // TODO: send wave data over network also
                 if !it.is_enabled continue;
-                circle_waves[current_circle_wave_index] = circle_wave(it.pos, is_enabled=true);
+                circle_waves[current_circle_wave_index] = circle_wave(it.pos, it.wave_color, is_enabled=true);
                 current_circle_wave_index += 1;
                 if current_circle_wave_index >= circle_waves.count then current_circle_wave_index = 0;
             }
 
             time_when_last_circle_wave_spawned = time_now;
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Update circle waves
+
+        for * ship: entities {
+            rot_delta := 0.0;
+
+            for * wave: circle_waves {
+                if !wave.is_enabled || !ship.is_enabled continue;
+
+                if wave.outer_radius < WAVE_WEAK_UNTIL_RADIUS continue;
+
+                pos_diff := ship.pos - wave.origin;
+                distance_squared := pos_diff.x * pos_diff.x + pos_diff.y * pos_diff.y;
+                wave_inner_radius := wave.outer_radius - wave.width;
+                if distance_squared > wave.outer_radius * wave.outer_radius ||
+                   distance_squared < wave_inner_radius * wave_inner_radius
+                {
+                    continue;
+                }
+
+                to_wave_center := atan2(pos_diff.y, pos_diff.x);
+                tangentality_to_wave := to_wave_center - ship.rot;
+
+                // TODO: decouple force from color
+                wave_force := WAVE_STRENGTH * wave.color.w * sin(tangentality_to_wave);
+
+                // TODO: do this when computing rot_delta in the first place
+                rot_delta += wave_force;
+            }
+
+            rot_delta = clamp(rot_delta, -WAVE_ROT_CLAMP, WAVE_ROT_CLAMP);
+            ship.rot += rot_delta;
         }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -297,24 +342,44 @@ main :: () {
                 return rot_m;
             };
 
-            for k: 0..N-1 for * circle_waves {
+            draw_circle_wave :: (draw_weak_ones := false) #expand {
+                it := `it;
+                k := `k;
                 if !it.is_enabled continue;
                 top_l := it.origin + multiply(rot_m[k],         .{ 0, it.outer_radius });
                 bot_l := it.origin + multiply(rot_m[k],         .{ 0, it.outer_radius - it.width });
                 top_r := it.origin + multiply(rot_m[(k + 1) % N], .{ 0, it.outer_radius });
                 bot_r := it.origin + multiply(rot_m[(k + 1) % N], .{ 0, it.outer_radius - it.width });
+
+                color := it.color;
+                if it.outer_radius < WAVE_WEAK_UNTIL_RADIUS {
+                    if !draw_weak_ones continue;
+                    color.xyz *= .5;
+                } else {
+                    if draw_weak_ones continue;
+                }
+
                 Simp.immediate_quad(
                     top_l, top_r, bot_r, bot_l,
-                    it.color, it.color, it.color, it.color,
+                    color, color, color, color,
                 );
+            }
+
+            // Draw strong ones first so that weak ones are drawn correctly over
+            for k: 0..N-1 for * circle_waves {
+                draw_circle_wave(draw_weak_ones = false);
+            }
+
+            for k: 0..N-1 for * circle_waves {
+                draw_circle_wave(draw_weak_ones = true);
             }
         }
 
         Simp.immediate_quad(
-            adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
-            adversary_mouse + .{ -ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
-            adversary_mouse + .{ +ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
-            adversary_mouse + .{ +ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
+            mouses[their_index] + .{ -ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
+            mouses[their_index] + .{ -ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
+            mouses[their_index] + .{ +ADVERSARY_MOUSE.size / 2, +ADVERSARY_MOUSE.size / 2 },
+            mouses[their_index] + .{ +ADVERSARY_MOUSE.size / 2, -ADVERSARY_MOUSE.size / 2 },
             ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color, ADVERSARY_MOUSE.color,
         );
 
@@ -371,10 +436,20 @@ main :: () {
         GetRect.slider(r, *RADIUS_DELTA, 0.0, 20, 1.0, *get_rect_theme.slider_theme, "RADIUS_DELTA ");
 
         r.y -= 20;
+        GetRect.slider(r, *TIME_BETWEEN_CIRCLE_WAVE_SPAWNS, 0.0, 1, 0.02, *get_rect_theme.slider_theme, "TIME_BETWEEN_CIRCLE_WAVE_SPAWNS ");
+
+        r.y -= 20;
         GetRect.slider(r, *FADE_AWAY_FACTOR, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "FADE_AWAY_FACTOR ");
 
         r.y -= 20;
-        GetRect.slider(r, *TIME_BETWEEN_CIRCLE_WAVE_SPAWNS, 0.0, 4, 0.2, *get_rect_theme.slider_theme, "TIME_BETWEEN_CIRCLE_WAVE_SPAWNS ");
+        GetRect.slider(r, *WAVE_STRENGTH, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "WAVE_STRENGTH ");
+
+        r.y -= 20;
+        GetRect.slider(r, *WAVE_ROT_CLAMP, 0.0, PI, PI / 36, *get_rect_theme.slider_theme, "WAVE_ROT_CLAMP ");
+
+        r.y -= 20;
+        GetRect.slider(r, *WAVE_WEAK_UNTIL_RADIUS, 0.0, 500.0, 10.0, *get_rect_theme.slider_theme, "WAVE_WEAK_UNTIL_RADIUS ");
+
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Main loop end
@@ -463,8 +538,11 @@ main :: () {
                 partially_received.size = 0;
                 last_received = partially_received.data;
                 last_received.entity.is_enabled = true;
+                remote_data_received = true;
             }
         }
+
+        remote_data_received = false;
 
         if !connecting {
             time := get_time();
@@ -540,6 +618,7 @@ Entity :: struct {
     rot: f32;
     size: Vector2;
     color: Vector4;
+    wave_color: Vector4;
     is_enabled: bool;
 };
 
@@ -551,12 +630,12 @@ CircleWave :: struct {
     is_enabled: bool = false;
 };
 
-circle_wave :: inline (origin: Vector2, is_enabled: bool = true) -> CircleWave {
+circle_wave :: inline (origin: Vector2, color: Vector4, is_enabled: bool = true) -> CircleWave {
     return .{
         origin = origin,
         is_enabled = is_enabled,
         outer_radius = INITIAL_OUTER_RADIUS,
-        color = WAVE_COLOR,
+        color = color,
         width = WAVE_WIDTH,
     };
 }
@@ -570,9 +649,11 @@ TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.1;
 MAX_RADIUS := 400.;
 RADIUS_DELTA := 1.;
 FADE_AWAY_FACTOR := 0.97;
+WAVE_STRENGTH := 0.97;
+WAVE_ROT_CLAMP := PI / 9;
+WAVE_WEAK_UNTIL_RADIUS := 40.;
 INITIAL_OUTER_RADIUS := 10.;
 WAVE_WIDTH : f32 = 10.;
-WAVE_COLOR := Vector4.{ 0.1, 0.4, 0.8, 1.0 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Network stuff
@@ -586,6 +667,8 @@ partially_sent     : Network_Packet_Piece;
 next_to_send       : Network_Packet;
 partially_received : Network_Packet_Piece;
 last_received      : Network_Packet;
+
+remote_data_received : bool;
 
 packet_size :: size_of(Network_Packet);
 Network_Packet :: struct {
@@ -655,6 +738,11 @@ rgb_to_hsv :: (r: float, g: float, b: float) -> (h: float, s: float, v: float) {
 }
 
 fract :: inline (x: float) -> float { return x - floor(x); }
+
+/// #no_debug breaks remedybg's line determination somehow (?)
+do_debug_break :: () {
+    debug_break();
+}
 
 #import "Basic";
 #import "Math";
