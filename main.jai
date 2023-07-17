@@ -212,7 +212,6 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update it
-        mouses : [entities.count] Vector2;
         my_index : int;
         their_index : int;
         if am_server {
@@ -224,7 +223,13 @@ main :: () {
         if remote_data_received {
             mouses[their_index] = last_received.mouse;
         } else {
-            // TODO: simulate
+            time_now := get_time();
+            if time_now > time_when_last_random_mouse_position_was_chosen + TIME_BETWEEN_RANDOM_MOUSE_POSITION_PICKS {
+                time_when_last_random_mouse_position_was_chosen = time_now;
+                x := random_get_zero_to_one() * window_width;
+                y := random_get_zero_to_one() * window_height;
+                mouses[their_index] = .{ x, y };
+            }
         }
 
         // TODO: factor this into a loop where each ship is targetting it's
@@ -613,6 +618,8 @@ MOV_SPEED := 4.8;
 N_ENTITIES :: 2;
 entities : [N_ENTITIES] Entity;
 
+mouses : [entities.count] Vector2;
+
 Entity :: struct {
     pos: Vector2;
     rot: f32;
@@ -654,6 +661,9 @@ WAVE_ROT_CLAMP := PI / 9;
 WAVE_WEAK_UNTIL_RADIUS := 40.;
 INITIAL_OUTER_RADIUS := 10.;
 WAVE_WIDTH : f32 = 10.;
+
+TIME_BETWEEN_RANDOM_MOUSE_POSITION_PICKS := 2;
+time_when_last_random_mouse_position_was_chosen : f64;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Network stuff
@@ -752,3 +762,4 @@ Input :: #import "Input";
 GetRect :: #import "GetRect";
 using Sock :: #import "Socket";
 #import "System";
+#import "Random";
