@@ -120,7 +120,7 @@ main :: () {
         size = .{ 10, 20 },
         color = .{ 1, 0, 0, 1 },
         wave_color = .{ 0.8, 0.4, 0.1, 1.0 },
-        is_enabled = am_server,
+        wave_spawner.waves = array_view(all_circle_waves, 0, all_circle_waves.count / 2),
     };
     entities[1] = .{
         pos = .{ window_width / 2.0 + 100, window_height / 2.0 },
@@ -128,7 +128,7 @@ main :: () {
         size = .{ 10, 20 },
         color = .{ 0, 0, 1, 1 },
         wave_color = .{ 0.1, 0.4, 0.8, 1.0 },
-        is_enabled = !am_server,
+        wave_spawner.waves = array_view(all_circle_waves, all_circle_waves.count / 2, all_circle_waves.count / 2),
     };
     assert(entities.count == 2, "TODO");
 
@@ -272,7 +272,7 @@ main :: () {
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update circle waves
 
-        for * circle_waves {
+        for * all_circle_waves {
             if !it.is_enabled continue;
 
             it.outer_radius += RADIUS_DELTA;
@@ -284,27 +284,27 @@ main :: () {
         }
 
         time_now := get_time();
-        if time_now - time_when_last_circle_wave_spawned > TIME_BETWEEN_CIRCLE_WAVE_SPAWNS {
 
-            for * entities {
+        for * entities {
+            if time_now - it.wave_spawner.time_when_last_one_spawned > TIME_BETWEEN_CIRCLE_WAVE_SPAWNS {
                 // TODO: send wave data over network also
-                if !it.is_enabled continue;
-                circle_waves[current_circle_wave_index] = circle_wave(it.pos, it.wave_color, is_enabled=true);
-                current_circle_wave_index += 1;
-                if current_circle_wave_index >= circle_waves.count then current_circle_wave_index = 0;
-            }
+                it.wave_spawner.waves[it.wave_spawner.current_index] = circle_wave(it.pos, it.wave_color, is_enabled=true);
+                it.wave_spawner.current_index += 1;
+                if it.wave_spawner.current_index >= it.wave_spawner.waves.count then
+                    it.wave_spawner.current_index = 0;
 
-            time_when_last_circle_wave_spawned = time_now;
+                it.wave_spawner.time_when_last_one_spawned = time_now;
+            }
         }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        // Update circle waves
+        // Wave collisions
 
         for * ship: entities {
             rot_delta := 0.0;
 
-            for * wave: circle_waves {
-                if !wave.is_enabled || !ship.is_enabled continue;
+            for * wave: all_circle_waves {
+                if !wave.is_enabled continue;
 
                 if wave.outer_radius < WAVE_WEAK_UNTIL_RADIUS continue;
 
@@ -371,11 +371,11 @@ main :: () {
             }
 
             // Draw strong ones first so that weak ones are drawn correctly over
-            for k: 0..N-1 for * circle_waves {
+            for k: 0..N-1 for * all_circle_waves {
                 draw_circle_wave(draw_weak_ones = false);
             }
 
-            for k: 0..N-1 for * circle_waves {
+            for k: 0..N-1 for * all_circle_waves {
                 draw_circle_wave(draw_weak_ones = true);
             }
         }
@@ -542,7 +542,6 @@ main :: () {
                 // fully received
                 partially_received.size = 0;
                 last_received = partially_received.data;
-                last_received.entity.is_enabled = true;
                 remote_data_received = true;
             }
         }
@@ -627,6 +626,13 @@ Entity :: struct {
     color: Vector4;
     wave_color: Vector4;
     is_enabled: bool;
+    wave_spawner: CircleWaveSpawner;
+};
+
+CircleWaveSpawner :: struct {
+    waves: [] CircleWave;
+    current_index: s32;
+    time_when_last_one_spawned: f64;
 };
 
 CircleWave :: struct {
@@ -648,9 +654,7 @@ circle_wave :: inline (origin: Vector2, color: Vector4, is_enabled: bool = true)
 }
 
 N_CIRCLE_WAVES :: 1024;
-circle_waves : [N_CIRCLE_WAVES] CircleWave;
-current_circle_wave_index : int = 0;
-time_when_last_circle_wave_spawned : f64;
+all_circle_waves : [N_CIRCLE_WAVES] CircleWave;
 
 TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.1;
 MAX_RADIUS := 400.;
