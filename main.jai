@@ -175,6 +175,10 @@ main :: () {
                 if it.key_pressed && it.key_code == .F4 {
                     do_debug_break();
                 }
+
+                if it.key_pressed && it.key_code == .F3 {
+                    SHOW_DEBUG_GUI = !SHOW_DEBUG_GUI;
+                }
             }
         }
 
@@ -428,33 +432,36 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Global variables debug editing
-        r := GetRect.get_rect(10, xx (window_height - 20), 200, 20);
-        GetRect.slider(r, *ROT_SPEED, 0.0, 0.1, 0.005, *get_rect_theme.slider_theme, "ROT_SPEED ");
+        if SHOW_DEBUG_GUI {
 
-        r.y -= 20;
-        GetRect.slider(r, *MOV_SPEED, 0.0, 10, 0.5, *get_rect_theme.slider_theme, "MOV_SPEED ");
+            r := GetRect.get_rect(10, xx (window_height - 20), 300, 20);
+            GetRect.slider(r, *ROT_SPEED, 0.0, 0.1, 0.005, *get_rect_theme.slider_theme, "ROT_SPEED ");
 
-        r.y -= 20;
-        GetRect.slider(r, *MAX_RADIUS, 0.0, 500, 10.0, *get_rect_theme.slider_theme, "MAX_RADIUS ");
+            r.y -= 20;
+            GetRect.slider(r, *MOV_SPEED, 0.0, 10, 0.5, *get_rect_theme.slider_theme, "MOV_SPEED ");
 
-        r.y -= 20;
-        GetRect.slider(r, *RADIUS_DELTA, 0.0, 20, 1.0, *get_rect_theme.slider_theme, "RADIUS_DELTA ");
+            r.y -= 20;
+            GetRect.slider(r, *MAX_RADIUS, 0.0, 500, 10.0, *get_rect_theme.slider_theme, "MAX_RADIUS ");
 
-        r.y -= 20;
-        GetRect.slider(r, *TIME_BETWEEN_CIRCLE_WAVE_SPAWNS, 0.0, 1, 0.02, *get_rect_theme.slider_theme, "TIME_BETWEEN_CIRCLE_WAVE_SPAWNS ");
+            r.y -= 20;
+            GetRect.slider(r, *RADIUS_DELTA, 0.0, 20, 1.0, *get_rect_theme.slider_theme, "RADIUS_DELTA ");
 
-        r.y -= 20;
-        GetRect.slider(r, *FADE_AWAY_FACTOR, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "FADE_AWAY_FACTOR ");
+            r.y -= 20;
+            GetRect.slider(r, *TIME_BETWEEN_CIRCLE_WAVE_SPAWNS, 0.0, 1, 0.02, *get_rect_theme.slider_theme, "WAVE_SPAWN_PERIOD ");
 
-        r.y -= 20;
-        GetRect.slider(r, *WAVE_STRENGTH, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "WAVE_STRENGTH ");
+            r.y -= 20;
+            GetRect.slider(r, *FADE_AWAY_FACTOR, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "FADE_AWAY_FACTOR ");
 
-        r.y -= 20;
-        GetRect.slider(r, *WAVE_ROT_CLAMP, 0.0, PI, PI / 36, *get_rect_theme.slider_theme, "WAVE_ROT_CLAMP ");
+            r.y -= 20;
+            GetRect.slider(r, *WAVE_STRENGTH, 0.0, 1, 1./255, *get_rect_theme.slider_theme, "WAVE_STRENGTH ");
 
-        r.y -= 20;
-        GetRect.slider(r, *WAVE_WEAK_UNTIL_RADIUS, 0.0, 500.0, 10.0, *get_rect_theme.slider_theme, "WAVE_WEAK_UNTIL_RADIUS ");
+            r.y -= 20;
+            GetRect.slider(r, *WAVE_ROT_CLAMP, 0.0, PI, PI / 36, *get_rect_theme.slider_theme, "WAVE_ROT_CLAMP ");
 
+            r.y -= 20;
+            GetRect.slider(r, *WAVE_WEAK_UNTIL_RADIUS, 0.0, 500.0, 10.0, *get_rect_theme.slider_theme, "WEAK_RAD ");
+
+        }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Main loop end
@@ -612,7 +619,7 @@ ADVERSARY_MOUSE : struct {
 };
 
 ROT_SPEED := .1;
-MOV_SPEED := 4.8;
+MOV_SPEED := 3.0;
 
 N_ENTITIES :: 2;
 entities : [N_ENTITIES] Entity;
@@ -656,7 +663,8 @@ circle_wave :: inline (origin: Vector2, color: Vector4, is_enabled: bool = true)
 N_CIRCLE_WAVES :: 1024;
 all_circle_waves : [N_CIRCLE_WAVES] CircleWave;
 
-TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.1;
+SHOW_DEBUG_GUI := false;
+TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.16;
 MAX_RADIUS := 400.;
 RADIUS_DELTA := 1.;
 FADE_AWAY_FACTOR := 0.97;
