@@ -3,8 +3,8 @@ main :: () {
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // parse command line arguments
     args := get_command_line_arguments();
-    am_server := true;
-    connecting := true;
+    am_server = true;
+    connecting = true;
     server_address : string;
     if args.count > 1 {
         if args[1] == {
@@ -28,7 +28,6 @@ main :: () {
     // way, to support event handling in the midst...
     port : u16 = 2276;
     socket_init();
-    server_addr : *addrinfo;
     if am_server {
         // XXX: maybe use UDP, cause TCP seems to be too slow
         listen_sock = socket(AF_INET, .SOCK_STREAM, .TCP);
@@ -556,134 +555,18 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Network IO
-        // TODO: this actually takes a lot of time, probably best not to do it every frame
-        if connecting {
-            if am_server {
-                // TODO: .VERY_VERBOSE_ONLY doesn't seem to do what I expected, gotta go investigate
-                // log("checking if somebody connected...", flags = .VERY_VERBOSE_ONLY);
-                conn_sock = accept(listen_sock, null, null);
-                if conn_sock == INVALID_SOCKET {
-                    err := get_last_socket_error();
-                    if err != SOCKET_WOULDBLOCK  log_error("`accept` failed: #% %", err, get_error_string(err));
-                    // log("no connection yet", flags = .VERY_VERBOSE_ONLY);
-                } else {
-                    log("got a connection", flags = .VERY_VERBOSE_ONLY);
-                    connecting = false;
-                }
-            } else /* am_client */ {
-                rc := connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
-                if rc {
-                    err := get_last_socket_error();
-                    if err != SOCKET_WOULDBLOCK {
-                        ignore := false;
-                        #if OS == .WINDOWS {
-                            // XXX: am I doing something wrong, or why would we get here?
-                            if err == WSAEISCONN   connecting = false;
-                            if err == WSAEALREADY  ignore = true;
-                        }
-                        if connecting && !ignore  log_error("`connect` failed: #% %", err, get_error_string(err));
-                    }
-                } else {
-                    connecting = false;
-                }
-            }
-        }
-
-        send_pending_packet :: (disconnected: *bool) -> fully_sent := false {
-            data := (cast(*u8) *partially_sent.data) + partially_sent.size;
-            size := packet_size - partially_sent.size;
-            rc := send(conn_sock, data, xx size, 0);
-            if rc < 0 {
-                err := get_last_socket_error();
-                if err != SOCKET_WOULDBLOCK  {
-                    log_error("Failed sending to socket: #% %", err, get_error_string(err));
-                    #if OS == .WINDOWS {
-                        disconnected.* = (err == WSAECONNRESET);
-                    }
-                }
-                return;
-            }
-
-            partially_sent.size += xx rc;
-            if partially_sent.size == packet_size {
-                // fully sent
-                partially_sent.size = 0;
-                partially_sent.data = next_to_send;
-                return fully_sent = true;
-            }
-
-            return;
-        }
-
-        // FIXME: copypaste
-        receive_pending_packet :: (disconnected: *bool) {
-            data := (cast(*u8) *partially_received.data) + partially_received.size;
-            size := packet_size - partially_received.size;
-            rc := recv(conn_sock, data, xx size, 0);
-            if rc < 0 {
-                err := get_last_socket_error();
-                if err != SOCKET_WOULDBLOCK  {
-                    log_error("Failed receiving from socket: #% %", err, get_error_string(err));
-                    #if OS == .WINDOWS {
-                        disconnected.* = (err == WSAECONNRESET);
-                    }
-                }
-                return;
-            }
-
-            partially_received.size += xx rc;
-            if partially_received.size == packet_size {
-                // fully received
-                partially_received.size = 0;
-                last_received = partially_received.data;
-                remote_data_received = true;
-            }
-        }
-
-        remote_data_received = false;
-
-        if !connecting {
-            time := get_time();
-            disconnected := false;
-
-            if partially_sent.size {
-                if send_pending_packet(*disconnected)
-                    last_packet_sent_time = time;
-            }
-            // Maybe sent the last pending packet, try sending the new one
-            if !partially_sent.size {
-                if time > last_packet_sent_time + 1 / cast(float) packets_sent_per_second
-                    if send_pending_packet(*disconnected)
-                        last_packet_sent_time = time;
-            }
-
-            // TODO: read all pending packets
-            if  partially_received.size  receive_pending_packet(*disconnected);
-            // Maybe received the last packet, try receiving another one
-            if !partially_received.size  receive_pending_packet(*disconnected);
-            if disconnected {
-                if am_server {
-                    log_error("lost connection to client, will listen for more connections...");
-                } else /* am_client */ {
-                    log_error("lost connection to server, will retry connecting...");
-                    // TODO: the socket should be closed and reinitialized
-
-                }
-                connecting = true;
-            }
-        }
+        frame_budget_secs := 1.0 / 60;
+        networking(time_start + frame_budget_secs);
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // End of frame
         reset_temporary_storage();
 
-        time_end := get_time();
-        millis_spent_on_frame := 1000 * (time_end - time_start);
-        millis_expected_to_spend := 1000 / 60;
-        millis_left_to_sleep := millis_expected_to_spend - millis_spent_on_frame;
-        if millis_left_to_sleep > 0 {
+        secs_spent_so_far := get_time() - time_start;
+        secs_left := frame_budget_secs - secs_spent_so_far;
+        if secs_left > 0 {
             // log("going to sleep for %", millis_left_to_sleep, flags = .VERY_VERBOSE_ONLY);
-            sleep_milliseconds(xx millis_left_to_sleep);
+            sleep_milliseconds(xx (secs_left * 1000));
         } else {
             // log("we're running late, not gonna sleep tonight", flags = .VERY_VERBOSE_ONLY);
         }
@@ -824,6 +707,150 @@ time_when_last_random_mouse_position_was_chosen : f64;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Network stuff
+
+networking :: (deadline: f64) {
+    Check_Timeout :: () #expand {
+        if get_time() > deadline `return;
+    }
+
+    Check_Timeout();
+
+    // TODO: this actually takes a lot of time, probably best not to do it every frame
+    if connecting {
+        if am_server {
+            // TODO: .VERY_VERBOSE_ONLY doesn't seem to do what I expected, gotta go investigate
+            // log("checking if somebody connected...", flags = .VERY_VERBOSE_ONLY);
+            conn_sock = accept(listen_sock, null, null);
+            if conn_sock == INVALID_SOCKET {
+                err := get_last_socket_error();
+                if err != SOCKET_WOULDBLOCK  log_error("`accept` failed: #% %", err, get_error_string(err));
+                // log("no connection yet", flags = .VERY_VERBOSE_ONLY);
+            } else {
+                log("got a connection", flags = .VERY_VERBOSE_ONLY);
+                connecting = false;
+            }
+        } else /* am_client */ {
+            rc := connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
+            if rc {
+                err := get_last_socket_error();
+                if err != SOCKET_WOULDBLOCK {
+                    ignore := false;
+                    #if OS == .WINDOWS {
+                        // XXX: am I doing something wrong, or why would we get here?
+                        if err == WSAEISCONN   connecting = false;
+                        if err == WSAEALREADY  ignore = true;
+                    }
+                    if connecting && !ignore  log_error("`connect` failed: #% %", err, get_error_string(err));
+                }
+            } else {
+                connecting = false;
+            }
+        }
+    }
+
+    Check_Timeout();
+
+    send_pending_packet :: (disconnected: *bool) -> fully_sent := false {
+        data := (cast(*u8) *partially_sent.data) + partially_sent.size;
+        size := packet_size - partially_sent.size;
+        rc := send(conn_sock, data, xx size, 0);
+        if rc < 0 {
+            err := get_last_socket_error();
+            if err != SOCKET_WOULDBLOCK  {
+                log_error("Failed sending to socket: #% %", err, get_error_string(err));
+                #if OS == .WINDOWS {
+                    disconnected.* = (err == WSAECONNRESET);
+                }
+            }
+            return;
+        }
+
+        partially_sent.size += xx rc;
+        if partially_sent.size == packet_size {
+            // fully sent
+            partially_sent.size = 0;
+            partially_sent.data = next_to_send;
+            return fully_sent = true;
+        }
+
+        return;
+    }
+
+    // FIXME: copypaste
+    receive_pending_packet :: (disconnected: *bool) {
+        data := (cast(*u8) *partially_received.data) + partially_received.size;
+        size := packet_size - partially_received.size;
+        rc := recv(conn_sock, data, xx size, 0);
+        if rc < 0 {
+            err := get_last_socket_error();
+            if err != SOCKET_WOULDBLOCK  {
+                log_error("Failed receiving from socket: #% %", err, get_error_string(err));
+                #if OS == .WINDOWS {
+                    disconnected.* = (err == WSAECONNRESET);
+                }
+            }
+            return;
+        }
+
+        partially_received.size += xx rc;
+        if partially_received.size == packet_size {
+            // fully received
+            partially_received.size = 0;
+            last_received = partially_received.data;
+            remote_data_received = true;
+        }
+    }
+
+    remote_data_received = false;
+    disconnected := false;
+
+    defer {
+        if disconnected {
+            if am_server {
+                log_error("lost connection to client, will listen for more connections...");
+            } else /* am_client */ {
+                log_error("lost connection to server, will retry connecting...");
+                // TODO: the socket should be closed and reinitialized
+
+            }
+            connecting = true;
+        }
+    }
+
+    if !connecting {
+        time := get_time();
+        disconnected := false;
+
+        if partially_sent.size {
+            if send_pending_packet(*disconnected)
+                last_packet_sent_time = time;
+        }
+
+        Check_Timeout();
+
+        // Maybe sent the last pending packet, try sending the new one
+        if !partially_sent.size {
+            if time > last_packet_sent_time + 1 / cast(float) packets_sent_per_second
+                if send_pending_packet(*disconnected)
+                    last_packet_sent_time = time;
+        }
+
+        Check_Timeout();
+
+        // TODO: read all pending packets
+        if  partially_received.size  receive_pending_packet(*disconnected);
+
+        Check_Timeout();
+
+        // Maybe received the last packet, try receiving another one
+        if !partially_received.size  receive_pending_packet(*disconnected);
+    }
+}
+
+am_server : bool;
+connecting : bool;
+server_addr : *addrinfo;
+
 conn_sock : Socket;
 listen_sock : Socket;
 
