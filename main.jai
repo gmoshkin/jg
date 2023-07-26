@@ -3,27 +3,23 @@ main :: () {
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // parse command line arguments
     args := get_command_line_arguments();
-    if args.count < 2 {
-        log_error("expected a command 'client' or 'server'");
-        exit(1);
-    }
-    am_server := false;
+    am_server := true;
     connecting := true;
     server_address : string;
-    if args[1] == {
-        case "server";
-            am_server = true;
+    if args.count > 1 {
+        if args[1] == {
+            case "connect";
+                am_server = false;
+                if args.count < 3 {
+                    log_error("expected a server address");
+                    exit(1);
+                }
+                server_address = args[2];
 
-        case "client";
-            if args.count < 3 {
-                log_error("expected a server address");
+            case;
+                log_error("unexpected command '%'", args[1]);
                 exit(1);
-            }
-            server_address = args[2];
-
-        case;
-            log_error("expected a command 'client' or 'server'");
-            exit(1);
+        }
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -102,6 +98,7 @@ main :: () {
 
     window_width  : s32 = 860;
     window_height : s32 = 480;
+    window_size : Vector2;
     window := create_window(window_width, window_height, "jg");
     quit := false;
 
@@ -118,6 +115,7 @@ main :: () {
         pos = .{ window_width / 2.0 - 100, window_height / 2.0 },
         rot = 0,
         size = .{ 10, 20 },
+        collision_radius = 15,
         color = .{ 1, 0, 0, 1 },
         wave_color = .{ 0.8, 0.4, 0.1, 1.0 },
         wave_spawner.waves = array_view(all_circle_waves, 0, all_circle_waves.count / 2),
@@ -126,11 +124,14 @@ main :: () {
         pos = .{ window_width / 2.0 + 100, window_height / 2.0 },
         rot = 0,
         size = .{ 10, 20 },
+        collision_radius = 15,
         color = .{ 0, 0, 1, 1 },
         wave_color = .{ 0.1, 0.4, 0.8, 1.0 },
         wave_spawner.waves = array_view(all_circle_waves, all_circle_waves.count / 2, all_circle_waves.count / 2),
     };
     assert(entities.count == 2, "TODO");
+
+    coin_spawner = .{ coins = coin_buffer };
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Game loop
@@ -147,6 +148,8 @@ main :: () {
             if it.window == window {
                 window_width  = it.width;
                 window_height = it.height;
+                window_size.x = xx window_width;
+                window_size.y = xx window_height;
             }
         }
 
@@ -227,12 +230,26 @@ main :: () {
         if remote_data_received {
             mouses[their_index] = last_received.mouse;
         } else {
-            time_now := get_time();
-            if time_now > time_when_last_random_mouse_position_was_chosen + TIME_BETWEEN_RANDOM_MOUSE_POSITION_PICKS {
-                time_when_last_random_mouse_position_was_chosen = time_now;
-                x := random_get_zero_to_one() * window_width;
-                y := random_get_zero_to_one() * window_height;
-                mouses[their_index] = .{ x, y };
+            closest_distance := FLOAT32_INFINITY;
+            closest_coin : *Coin = null;
+            for * coin: coin_buffer {
+                if !coin.is_enabled then continue;
+                d := distance(coin.origin, entities[their_index].pos);
+                if d < closest_distance {
+                    closest_distance = d;
+                    closest_coin = coin;
+                }
+            }
+            if closest_coin {
+                mouses[their_index] = closest_coin.origin;
+            } else {
+                time_now := get_time();
+                if time_now > time_when_last_random_mouse_position_was_chosen + TIME_BETWEEN_RANDOM_MOUSE_POSITION_PICKS {
+                    time_when_last_random_mouse_position_was_chosen = time_now;
+                    x := random_get_zero_to_one() * window_width;
+                    y := random_get_zero_to_one() * window_height;
+                    mouses[their_index] = .{ x, y };
+                }
             }
         }
 
@@ -336,21 +353,62 @@ main :: () {
         }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Coin spawning
+
+        time_now = get_time();
+
+        assert(Coin_Spawner_Parameters.max_live_ones < coin_buffer.count);
+        if time_now > coin_spawner.time_when_last_one_spawned + Coin_Spawner_Parameters.spawn_period
+            && coin_spawner.n_live_ones < Coin_Spawner_Parameters.max_live_ones
+        {
+            using coin_spawner;
+            x := random_get_zero_to_one() * window_width;
+            y := random_get_zero_to_one() * window_height;
+            coins[current_index] = Coin.with_defaults(.{ x, y });
+
+            current_index += 1;
+            if current_index >= coins.count then current_index = 0;
+            n_live_ones += 1;
+
+            // Don't overwrite a live coin
+            while coins[current_index].is_enabled {
+                current_index += 1;
+                if current_index >= coins.count then current_index = 0;
+            }
+
+            time_when_last_one_spawned = time_now;
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Coin collisions
+
+        for * ship, ship_index: entities {
+            for * coin: coin_buffer {
+                if !coin.is_enabled then continue;
+                if distance(coin.origin, ship.pos) > coin.radius + ship.collision_radius then continue;
+                coin.is_enabled = false;
+                score_board.points[ship_index] += 1;
+                coin_spawner.n_live_ones -= 1;
+            }
+        }
+
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Draw
         Simp.set_shader_for_color(enable_blend = true);
 
+        // Rotation matrices for drawing circly stuff
+        N :: 32;
+        rot_m : [N] Matrix2 : #run -> [N] Matrix2 {
+            rot_m : [N] Matrix2;
+            for k: 0..N-1 {
+                rot_m[k].v[0] = .{  sin(k * TAU / N), cos(k * TAU / N) };
+                rot_m[k].v[1] = .{ -cos(k * TAU / N), sin(k * TAU / N) };
+            }
+            return rot_m;
+        };
+
         // Circle waves
         {
-            N :: 32;
-            rot_m : [N] Matrix2 : #run -> [N] Matrix2 {
-                rot_m : [N] Matrix2;
-                for k: 0..N-1 {
-                    rot_m[k].v[0] = .{  sin(k * TAU / N), cos(k * TAU / N) };
-                    rot_m[k].v[1] = .{ -cos(k * TAU / N), sin(k * TAU / N) };
-                }
-                return rot_m;
-            };
-
             draw_circle_wave :: (draw_weak_ones := false) #expand {
                 it := `it;
                 k := `k;
@@ -381,6 +439,25 @@ main :: () {
 
             for k: 0..N-1 for * all_circle_waves {
                 draw_circle_wave(draw_weak_ones = true);
+            }
+        }
+
+        for k: 0..N-1 {
+            for * coin_buffer {
+                if !it.is_enabled continue;
+
+                draw_coin :: (coin: *Coin, k: s64) #expand {
+                    o := coin.origin;
+                    a := coin.origin + multiply(rot_m[k],           .{ 0, coin.radius });
+                    b := coin.origin + multiply(rot_m[(k + 1) % N], .{ 0, coin.radius });
+
+                    Simp.immediate_triangle(
+                        .{ xy = o }, .{ xy = a }, .{ xy = b },
+                        coin.color, coin.color, coin.color,
+                    );
+                }
+
+                draw_coin(it, k);
             }
         }
 
@@ -428,6 +505,16 @@ main :: () {
                 .{ xy = head_right },
                 it.color, it.color, it.color,
             );
+        }
+
+        {
+            x := window_size.x / 2 - 50;
+            y := window_size.y - 50;
+            r := GetRect.get_rect(x, y, 100, 20);
+            GetRect.label(r, tprint("%", score_board.points[red_ship_id]), *get_rect_theme.label_theme);
+
+            r.x += 30;
+            GetRect.label(r, tprint("%", score_board.points[blue_ship_id]), *get_rect_theme.label_theme);
         }
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -621,9 +708,14 @@ ADVERSARY_MOUSE : struct {
 ROT_SPEED := .1;
 MOV_SPEED := 3.0;
 
+//
+// Ships
+//
 N_ENTITIES :: 2;
 entities : [N_ENTITIES] Entity;
 
+red_ship_id :: 0;
+blue_ship_id :: 1;
 mouses : [entities.count] Vector2;
 
 Entity :: struct {
@@ -634,8 +726,12 @@ Entity :: struct {
     wave_color: Vector4;
     is_enabled: bool;
     wave_spawner: CircleWaveSpawner;
+    collision_radius: f32;
 };
 
+//
+// Waves
+//
 CircleWaveSpawner :: struct {
     waves: [] CircleWave;
     current_index: s32;
@@ -663,6 +759,55 @@ circle_wave :: inline (origin: Vector2, color: Vector4, is_enabled: bool = true)
 N_CIRCLE_WAVES :: 1024;
 all_circle_waves : [N_CIRCLE_WAVES] CircleWave;
 
+//
+// Coins
+//
+Coin_Spawner :: struct {
+    coins: [] Coin;
+    current_index: s32;
+    time_when_last_one_spawned: f64;
+    n_live_ones: s32;
+}
+coin_spawner : Coin_Spawner;
+
+Coin_Spawner_Parameters : struct {
+    spawn_period : f64 = 2.0;
+    default_radius : f32 = 10.0;
+    default_color := Vector4.{ 1.0, 0.8, 0.0, 1 };
+    max_live_ones : s32 = 4;
+};
+
+Coin :: struct {
+    origin: Vector2;
+    radius: f32;
+    color: Vector4;
+    is_enabled: bool = false;
+
+    with_defaults :: (_origin: Vector2) -> Coin {
+        return .{
+            origin = _origin,
+            radius = Coin_Spawner_Parameters.default_radius,
+            color = Coin_Spawner_Parameters.default_color,
+            is_enabled = true,
+        };
+    }
+}
+
+COIN_BUFFER_COUNT :: 32;
+coin_buffer : [COIN_BUFFER_COUNT] Coin;
+
+//
+// Score board
+//
+
+Score_Board :: struct {
+    points : [entities.count] s32;
+}
+score_board : Score_Board;
+
+//
+// Parameters
+//
 SHOW_DEBUG_GUI := false;
 TIME_BETWEEN_CIRCLE_WAVE_SPAWNS := 0.16;
 MAX_RADIUS := 400.;
