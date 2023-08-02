@@ -117,7 +117,7 @@ main :: () {
         collision_radius = 15,
         color = .{ 1, 0, 0, 1 },
         wave_color = .{ 0.8, 0.4, 0.1, 1.0 },
-        wave_spawner.waves = array_view(all_circle_waves, 0, all_circle_waves.count / 2),
+        wave_spawner.waves = array_view(circle_wave_buffer, 0, circle_wave_buffer.count / 2),
     };
     entities[1] = .{
         pos = .{ window_width / 2.0 + 100, window_height / 2.0 },
@@ -126,11 +126,17 @@ main :: () {
         collision_radius = 15,
         color = .{ 0, 0, 1, 1 },
         wave_color = .{ 0.1, 0.4, 0.8, 1.0 },
-        wave_spawner.waves = array_view(all_circle_waves, all_circle_waves.count / 2, all_circle_waves.count / 2),
+        wave_spawner.waves = array_view(circle_wave_buffer, circle_wave_buffer.count / 2, circle_wave_buffer.count / 2),
     };
     assert(entities.count == 2, "TODO");
 
     coin_spawner = .{ coins = coin_buffer };
+
+    // Init network buffers
+    net_buf_out.front.capacity    = array_view(net_buffer, BUFFER_SIZE * 0, BUFFER_SIZE);
+    net_buf_out.back.capacity     = array_view(net_buffer, BUFFER_SIZE * 1, BUFFER_SIZE);
+    net_buf_in.front.data.backing = array_view(net_buffer, BUFFER_SIZE * 2, BUFFER_SIZE);
+    net_buf_in.back.capacity      = array_view(net_buffer, BUFFER_SIZE * 3, BUFFER_SIZE * 5);
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Game loop
@@ -218,17 +224,15 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update it
-        my_index : int;
-        their_index : int;
         if am_server {
             my_index = 0; their_index = 1;
         } else {
             my_index = 1; their_index = 0;
         }
         mouses[my_index] = mouse;
-        if remote_data_received {
+        if last_received.ready {
             mouses[their_index] = last_received.mouse;
-        } else {
+        } else if !have_human_player {
             closest_distance := FLOAT32_INFINITY;
             closest_coin : *Coin = null;
             for * coin: coin_buffer {
@@ -281,18 +285,10 @@ main :: () {
             entities[my_index].pos = .{ xx (window_width / 2), xx (window_height / 2) };
         }
 
-        next_to_send.mouse = mouses[my_index];
-        next_to_send.entity = entities[my_index];
-
-        if remote_data_received {
-            // Override the data we just simulated
-            entities[their_index] = last_received.entity;
-        }
-
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Update circle waves
 
-        for * all_circle_waves {
+        for * circle_wave_buffer {
             if !it.is_enabled continue;
 
             it.outer_radius += RADIUS_DELTA;
@@ -300,7 +296,7 @@ main :: () {
                 it.is_enabled = false;
             }
 
-            it.color.w *= FADE_AWAY_FACTOR;
+            it.strength *= FADE_AWAY_FACTOR;
         }
 
         time_now := get_time();
@@ -323,7 +319,7 @@ main :: () {
         for * ship: entities {
             rot_delta := 0.0;
 
-            for * wave: all_circle_waves {
+            for * wave: circle_wave_buffer {
                 if !wave.is_enabled continue;
 
                 if wave.outer_radius < WAVE_WEAK_UNTIL_RADIUS continue;
@@ -340,8 +336,7 @@ main :: () {
                 to_wave_center := atan2(pos_diff.y, pos_diff.x);
                 tangentality_to_wave := to_wave_center - ship.rot;
 
-                // TODO: decouple force from color
-                wave_force := WAVE_STRENGTH * wave.color.w * sin(tangentality_to_wave);
+                wave_force := WAVE_STRENGTH * wave.strength * sin(tangentality_to_wave);
 
                 // TODO: do this when computing rot_delta in the first place
                 rot_delta += wave_force;
@@ -391,6 +386,37 @@ main :: () {
             }
         }
 
+
+        if last_received.ready {
+            have_human_player = true;
+            // Override the data we just simulated
+            mouses[their_index] = last_received.mouse;
+
+            ship := *entities[their_index];
+            ship.base = last_received.ship;
+
+            waves := *entities[their_index].wave_spawner.waves;
+            for 0..last_received.waves_count-1 {
+                waves.*[it].base = last_received.waves[it];
+                waves.*[it].is_enabled = true;
+            }
+            for last_received.waves_count..waves.count-1 {
+                waves.*[it].is_enabled = false;
+            }
+
+            if !am_server {
+                coins := *coin_spawner.coins;
+                for 0..last_received.coins_count-1 {
+                    coins.*[it].base = last_received.coins[it];
+                    coins.*[it].is_enabled = true;
+                }
+                for last_received.coins_count..coins.count-1 {
+                    coins.*[it].is_enabled = false;
+                }
+            }
+        }
+
+
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Draw
         Simp.set_shader_for_color(enable_blend = true);
@@ -424,6 +450,7 @@ main :: () {
                 } else {
                     if draw_weak_ones continue;
                 }
+                color.w = it.strength;
 
                 Simp.immediate_quad(
                     top_l, top_r, bot_r, bot_l,
@@ -432,11 +459,11 @@ main :: () {
             }
 
             // Draw strong ones first so that weak ones are drawn correctly over
-            for k: 0..N-1 for * all_circle_waves {
+            for k: 0..N-1 for * circle_wave_buffer {
                 draw_circle_wave(draw_weak_ones = false);
             }
 
-            for k: 0..N-1 for * all_circle_waves {
+            for k: 0..N-1 for * circle_wave_buffer {
                 draw_circle_wave(draw_weak_ones = true);
             }
         }
@@ -597,13 +624,21 @@ MOV_SPEED := 3.0;
 N_ENTITIES :: 2;
 entities : [N_ENTITIES] Entity;
 
+my_index : s32;
+their_index : s32;
+
 red_ship_id :: 0;
 blue_ship_id :: 1;
 mouses : [entities.count] Vector2;
 
 Entity :: struct {
-    pos: Vector2;
-    rot: f32;
+    // Fields we send over network
+    Base :: struct {
+        pos: Vector2;
+        rot: f32;
+    }
+    using base: Base;
+
     size: Vector2;
     color: Vector4;
     wave_color: Vector4;
@@ -622,8 +657,14 @@ CircleWaveSpawner :: struct {
 };
 
 CircleWave :: struct {
-    origin: Vector2;
-    outer_radius: f32;
+    // Fields we send over network
+    Base :: struct {
+        origin: Vector2;
+        outer_radius: f32;
+        strength: f32;
+    }
+    using base: Base;
+
     color: Vector4;
     width: f32;
     is_enabled: bool = false;
@@ -634,13 +675,15 @@ circle_wave :: inline (origin: Vector2, color: Vector4, is_enabled: bool = true)
         origin = origin,
         is_enabled = is_enabled,
         outer_radius = INITIAL_OUTER_RADIUS,
+        strength = 1,
         color = color,
         width = WAVE_WIDTH,
     };
 }
 
-N_CIRCLE_WAVES :: 1024;
-all_circle_waves : [N_CIRCLE_WAVES] CircleWave;
+MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY :: 32;
+N_CIRCLE_WAVES :: MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY * entities.count;
+circle_wave_buffer : [N_CIRCLE_WAVES] CircleWave;
 
 //
 // Coins
@@ -661,7 +704,12 @@ Coin_Spawner_Parameters : struct {
 };
 
 Coin :: struct {
-    origin: Vector2;
+    // Fields we send over network
+    Base :: struct {
+        origin: Vector2;
+    };
+    using base: Base;
+
     radius: f32;
     color: Vector4;
     is_enabled: bool = false;
@@ -750,58 +798,7 @@ networking :: (deadline: f64) {
 
     Check_Timeout();
 
-    send_pending_packet :: (disconnected: *bool) -> fully_sent := false {
-        data := (cast(*u8) *partially_sent.data) + partially_sent.size;
-        size := packet_size - partially_sent.size;
-        rc := send(conn_sock, data, xx size, 0);
-        if rc < 0 {
-            err := get_last_socket_error();
-            if err != SOCKET_WOULDBLOCK  {
-                log_error("Failed sending to socket: #% %", err, get_error_string(err));
-                #if OS == .WINDOWS {
-                    disconnected.* = (err == WSAECONNRESET);
-                }
-            }
-            return;
-        }
-
-        partially_sent.size += xx rc;
-        if partially_sent.size == packet_size {
-            // fully sent
-            partially_sent.size = 0;
-            partially_sent.data = next_to_send;
-            return fully_sent = true;
-        }
-
-        return;
-    }
-
-    // FIXME: copypaste
-    receive_pending_packet :: (disconnected: *bool) {
-        data := (cast(*u8) *partially_received.data) + partially_received.size;
-        size := packet_size - partially_received.size;
-        rc := recv(conn_sock, data, xx size, 0);
-        if rc < 0 {
-            err := get_last_socket_error();
-            if err != SOCKET_WOULDBLOCK  {
-                log_error("Failed receiving from socket: #% %", err, get_error_string(err));
-                #if OS == .WINDOWS {
-                    disconnected.* = (err == WSAECONNRESET);
-                }
-            }
-            return;
-        }
-
-        partially_received.size += xx rc;
-        if partially_received.size == packet_size {
-            // fully received
-            partially_received.size = 0;
-            last_received = partially_received.data;
-            remote_data_received = true;
-        }
-    }
-
-    remote_data_received = false;
+    last_received.ready = false;
     disconnected := false;
 
     defer {
@@ -811,43 +808,325 @@ networking :: (deadline: f64) {
             } else /* am_client */ {
                 log_error("lost connection to server, will retry connecting...");
                 // TODO: the socket should be closed and reinitialized
-
             }
             connecting = true;
+
+            net_buf_out.back.pending.count = 0;
+            reset(*net_buf_in.front.data);
+            net_buf_in.front.packet_size = 0;
         }
     }
 
     if !connecting {
-        time := get_time();
-        disconnected := false;
+        // Serialize current state to the front buffer
+        net_buf_out.front.pending = serialize_to_send(net_buf_out.front.capacity, my_index);
 
-        if partially_sent.size {
-            if send_pending_packet(*disconnected)
-                last_packet_sent_time = time;
+        while true {
+            // if get_time() < last_packet_sent_time + 1 / cast(float) packets_sent_per_second break;
+            if disconnected return;
+            Check_Timeout();
+
+            if !net_buf_out.back.pending {
+                Swap(*net_buf_out.front, *net_buf_out.back);
+                if !net_buf_out.back.pending break;
+                sync += 1;
+                copy(net_buf_out.back.pending.data + 4, *sync);
+            }
+
+            n_bytes_sent, _disconnected := send_slice(net_buf_out.back.pending);
+            disconnected |= _disconnected;
+
+            if n_bytes_sent {
+                Setup_Mem_Dump_Printer();
+                log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+                log("sent packet:");
+                log("%", cast(Mem_Dump) array_view(net_buf_out.back.pending, 0, n_bytes_sent));
+                log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+            }
+
+            if !n_bytes_sent break;
+            advance(*net_buf_out.back.pending, n_bytes_sent);
+
+            if net_buf_out.back.pending {
+                // failed to send whole buffer ->  will retry next time
+                break;
+            } else {
+                // sent whole buffer
+                last_packet_sent_time = get_time();
+            }
         }
 
-        Check_Timeout();
+        should_be_receiving_packets := true;
+        while should_be_receiving_packets {
+            if disconnected return;
+            Check_Timeout();
 
-        // Maybe sent the last pending packet, try sending the new one
-        if !partially_sent.size {
-            if time > last_packet_sent_time + 1 / cast(float) packets_sent_per_second
-                if send_pending_packet(*disconnected)
-                    last_packet_sent_time = time;
+            n_bytes_received, _disconnected := receive_slice(net_buf_in.back.capacity);
+            disconnected |= _disconnected;
+
+            if n_bytes_received {
+                Setup_Mem_Dump_Printer();
+                log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+                log("received data:");
+                log("%", cast(Mem_Dump) array_view(net_buf_in.back.capacity, 0, n_bytes_received));
+                log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+            }
+
+            if !n_bytes_received break;
+
+            last_time_received_something = get_time();
+
+            // Didn't fill up the buffer -> received all there was to receive
+            if n_bytes_received != net_buf_in.back.capacity.count then should_be_receiving_packets = false;
+
+            received_slice := array_view(net_buf_in.back.capacity, 0, n_bytes_received);
+            while received_slice {
+                log_dbg(net_buf_in.front.packet_size);
+                packet_piece_size := 0;
+                if net_buf_in.front.packet_size {
+                    packet_piece_size = net_buf_in.front.packet_size - count(*net_buf_in.front.data);
+                } else {
+                    packet_size := read_packet_header(received_slice);
+                    log_dbg(packet_size);
+                    pretty_assert(packet_size > 0);
+                    net_buf_in.front.packet_size = packet_size;
+
+                    packet_piece_size = min(packet_size, xx received_slice.count);
+                }
+                log_dbg(packet_piece_size);
+                packet_piece := array_view(received_slice, 0, packet_piece_size);
+                append(*net_buf_in.front.data, packet_piece);
+                advance(*received_slice, packet_piece_size);
+
+                ring_buffer_count := count(*net_buf_in.front.data);
+                log_dbg(ring_buffer_count);
+                log_dbg(net_buf_in.front.packet_size);
+                if ring_buffer_count != net_buf_in.front.packet_size break;
+
+                n_bytes_consumed, consumed := deserialize_received_data(net_buf_in.front.data.backing, their_index);
+                assert(consumed);
+                pretty_assert(n_bytes_consumed == count(*net_buf_in.front.data));
+
+                reset(*net_buf_in.front.data);
+                net_buf_in.front.packet_size = 0;
+            }
         }
 
-        Check_Timeout();
-
-        // TODO: read all pending packets
-        if  partially_received.size  receive_pending_packet(*disconnected);
-
-        Check_Timeout();
-
-        // Maybe received the last packet, try receiving another one
-        if !partially_received.size  receive_pending_packet(*disconnected);
+        if last_time_received_something > 0 && get_time() - last_time_received_something > 1 {
+            debug_break();
+        }
     }
 }
 
+sync : s32 = 0;
+last_time_received_something : f64 = -1;
+
+read_packet_header :: (buffer: [] u8) -> packet_size: s32 {
+    if buffer.count < 16 then return -1;
+
+    magic : [4] u8;
+    memcpy(magic.data, buffer.data, size_of(type_of(magic)));
+    pretty_assert(array_equals(magic, MAGIC));
+
+    packet_size : s32;
+    memcpy(*packet_size, buffer.data + 4 + 4, size_of(s32));
+
+    return packet_size;
+}
+
+send_slice :: (slice: [] u8) -> n_bytes_sent: s64, need_reconnect : bool {
+    rc := send(conn_sock, slice.data, xx slice.count, 0);
+    if rc < 0 {
+        need_reconnect := false;
+        err := get_last_socket_error();
+        if err != SOCKET_WOULDBLOCK  {
+            log_error("Failed sending to socket: #% %", err, get_error_string(err));
+            #if OS == .WINDOWS {
+                need_reconnect = (err == WSAECONNRESET);
+            } else {
+                // TODO: always need_reconnect = true??
+            }
+        }
+        return 0, need_reconnect;
+    }
+
+    return rc, false;
+}
+
+// FIXME: copypaste
+receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
+    rc := recv(conn_sock, slice.data, xx slice.count, 0);
+
+    Handle_Error :: (rc: s32) #expand {
+        if rc < 0 {
+            need_reconnect := false;
+            err := get_last_socket_error();
+            if err != SOCKET_WOULDBLOCK  {
+                log_error("Failed receiving from socket: #% %", err, get_error_string(err));
+                #if OS == .WINDOWS {
+                    need_reconnect = (err == WSAECONNRESET);
+                } else {
+                    // TODO: always need_reconnect = true??
+                }
+            }
+            `return 0, need_reconnect;
+        }
+    }
+    Handle_Error(rc);
+
+    return rc, false;
+}
+
+MAGIC :: u8.[ 0xb0, 0x00, 0xb1, 0xe5 ];
+
+serialize_to_send :: (buffer: [] u8, entity_id: s32) -> written_slice: [] u8 {
+    copy_and_advance :: (slice: *[] u8, v: *$T) #expand {
+        assert(slice.count >= size_of(T));
+        memcpy(slice.data, v, size_of(T));
+        advance(slice, size_of(T));
+    }
+
+    slice := buffer;
+
+
+    copy_and_advance(*slice, *MAGIC);
+
+    sync: s32 = 0;
+    copy_and_advance(*slice, *sync);
+
+    packet_size : s32 = 0;
+    p_packet_size := slice.data;
+    copy_and_advance(*slice, *packet_size);
+
+
+    copy_and_advance(*slice, *cast([4] u8) "\x11\x11\x11\x11");
+    copy_and_advance(*slice, *mouses[entity_id]);
+    ship := *entities[entity_id];
+    copy_and_advance(*slice, *cast([4] u8) "\x22\x22\x22\x22");
+    copy_and_advance(*slice, *ship.pos);
+    copy_and_advance(*slice, *ship.rot);
+
+
+    waves_count : s32 = 0;
+    copy_and_advance(*slice, *cast([4] u8) "\x33\x33\x33\x33");
+    p_waves_count := slice.data;
+    copy_and_advance(*slice, *waves_count);
+    for * wave: ship.wave_spawner.waves {
+        if !wave.is_enabled continue;
+
+        waves_count += 1;
+        copy_and_advance(*slice, *wave.origin);
+        copy_and_advance(*slice, *wave.outer_radius);
+        copy_and_advance(*slice, *wave.strength);
+    }
+    copy(p_waves_count, *waves_count);
+
+
+    coins_count : s32 = 0;
+    copy_and_advance(*slice, *cast([4] u8) "\x44\x44\x44\x44");
+    p_coins_count := slice.data;
+    copy_and_advance(*slice, *coins_count);
+    if am_server {
+        for * coin: coin_buffer {
+            if !coin.is_enabled continue;
+
+            coins_count += 1;
+            copy_and_advance(*slice, *coin.origin);
+        }
+        copy(p_coins_count, *coins_count);
+    }
+
+
+    res: [] u8 = ---;
+    res.data = buffer.data;
+    res.count = slice.data - buffer.data;
+
+    packet_size = xx res.count;
+    copy(p_packet_size, *packet_size);
+
+    return res;
+}
+
+deserialize_received_data :: (buffer: [] u8, entity_id: s32) -> n_bytes_consumed: s32, deserialized_full_packet: bool {
+    try_read_and_advance :: (slice: *[] u8, v: *$T) #expand {
+        if slice.count < size_of(T) `return 0, false;
+        memcpy(v, slice.data, size_of(T));
+        advance(slice, size_of(T));
+    }
+
+    slice := buffer;
+
+
+    magic : [4] u8;
+    try_read_and_advance(*slice, *magic);
+    assert(array_equals(magic, MAGIC));
+    // log("read magic");
+
+    sync: s32;
+    try_read_and_advance(*slice, *sync);
+    // log_dbg(sync);
+
+    packet_size : s32;
+    try_read_and_advance(*slice, *packet_size);
+    // log_dbg(packet_size);
+
+
+    try_read_and_advance(*slice, *magic);
+    assert(array_equals(magic, xx "\x11\x11\x11\x11"));
+    try_read_and_advance(*slice, *last_received.mouse);
+    // log_dbg(last_received.mouse);
+
+    try_read_and_advance(*slice, *magic);
+    assert(array_equals(magic, xx "\x22\x22\x22\x22"));
+    try_read_and_advance(*slice, *last_received.ship.pos);
+    // log_dbg(last_received.ship.pos);
+    try_read_and_advance(*slice, *last_received.ship.rot);
+    // log_dbg(last_received.ship.rot);
+
+
+    try_read_and_advance(*slice, *magic);
+    assert(array_equals(magic, xx "\x33\x33\x33\x33"));
+    try_read_and_advance(*slice, *last_received.waves_count);
+    // log_dbg(last_received.waves_count);
+    assert(last_received.waves_count <= last_received.waves.count);
+    for 0..last_received.waves_count-1 {
+        wave := *last_received.waves[it];
+        try_read_and_advance(*slice, *wave.origin);
+        try_read_and_advance(*slice, *wave.outer_radius);
+        try_read_and_advance(*slice, *wave.strength);
+        // log_dbg(it);
+        // log_dbg(wave.*);
+    }
+
+    try_read_and_advance(*slice, *magic);
+    assert(array_equals(magic, xx "\x44\x44\x44\x44"));
+    try_read_and_advance(*slice, *last_received.coins_count);
+    // log_dbg(last_received.coins_count);
+    assert(last_received.coins_count <= last_received.coins.count);
+    for 0..last_received.coins_count-1 {
+        coin := *last_received.coins[it];
+        try_read_and_advance(*slice, *coin.origin);
+        // log_dbg(it);
+        // log_dbg(coin.origin);
+    }
+
+    last_received.ready = true;
+    n_bytes_consumed := slice.data - buffer.data;
+    return xx n_bytes_consumed, true;
+}
+
+last_received : struct {
+    ship : Entity.Base;
+    mouse : Vector2;
+    waves : [MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY] CircleWave.Base;
+    waves_count : s32;
+    coins : [coin_buffer.count] Coin.Base;
+    coins_count : s32;
+    ready : bool;
+};
+
 am_server : bool;
+have_human_player : bool;
 connecting : bool;
 server_addr : *addrinfo;
 
@@ -857,24 +1136,157 @@ listen_sock : Socket;
 packets_sent_per_second := 30;
 last_packet_sent_time : f64 = 0.0;
 
-partially_sent     : Network_Packet_Piece;
-next_to_send       : Network_Packet;
-partially_received : Network_Packet_Piece;
-last_received      : Network_Packet;
+BUFFER_SIZE :: 1024;
 
-remote_data_received : bool;
+net_buffer : [BUFFER_SIZE * 8] u8;
+IO_Buffer :: struct {
+    capacity: [] u8;
+    pending: [] u8;
+}
 
-packet_size :: size_of(Network_Packet);
-Network_Packet :: struct {
-    header : [8] u8 = xx "packet[[";
+/*
+
+empty:
+[. . . . . . . .]
+ ^
+ end:0
+ start:0
+ empty = true
+
+push_back(1):
+[1 . . . . . . .]
+ ^ ^
+ | end:1
+ start:0
+ empty = false
+
+push_back(2):
+[1 2 . . . . . .]
+ ^   ^
+ |   end:2
+ start:0
+ empty = false
+
+pop_front() -> 1:
+[. 2 . . . . . .]
+   ^ ^
+   | end:2
+   start:1
+ empty = false
+
+push_front(3):
+[3 2 . . . . . .]
+ ^   ^
+ |   end:2
+ start:0
+ empty = false
+
+push_front(4):
+[3 2 . . . . . 4]
+     ^         ^
+     end:2     |
+               start:7
+ empty = false
+
+push_front(5),
+push_back(6),
+push_front(8),
+push_back(7),
+push_back(0):
+[3 2 6 7 0 8 5 4]
+           ^
+           end:
+           start
+ empty = false
+
+pop_front() -> 8:
+[3 2 6 7 0 . 5 4]
+           ^ ^
+           end:5
+             start:6
+
+ */
+Ring_Buffer :: struct {
+    backing: [] u8;
+    start: s32;
+    end: s32;
+    // TODO: store count directly instead
+    is_empty: bool = true;
+}
+
+reset :: inline (using rb: *Ring_Buffer) {
+    start, end = 0;
+    is_empty = true;
+}
+
+is_empty :: inline (using rb: *Ring_Buffer) -> bool {
+    return is_empty;
+}
+
+is_full :: inline (using rb: *Ring_Buffer) -> bool {
+    return start == end && !is_empty;
+}
+
+count :: inline (using rb: *Ring_Buffer) -> s32 {
+    if is_empty         return 0;
+    else if end > start return end - start;
+    else                return end - start + xx backing.count;
+}
+
+capacity :: inline (using rb: *Ring_Buffer) -> s32 {
+    return xx backing.count - count(rb);
+}
+
+push_back :: inline (using rb: *Ring_Buffer, v: u8) {
+    assert(capacity(rb) >= 1);
+    backing[end] = v;
+    end = (end + 1) % xx backing.count;
+    is_empty = false;
+}
+
+append :: inline (using rb: *Ring_Buffer, data: [] u8) {
+    assert(capacity(rb) >= data.count);
+    // TODO: optimize
+    for data push_back(rb, it);
+}
+
+// // May not return all the free space in the buffer, because you know why
+// back_slice :: (using rb: *Ring_Buffer) -> [] u8 {
+//     res : u8[] = ---;
+//     res.data = backing.data + end;
+//     if end >= start then
+//         // TODO: if end == count
+//         res.count = (backing.count - end) * is_empty;
+//     else
+//         res.count = start - end;
+//     return res;
+// }
+
+// advance_back :: (using rb: *Ring_Buffer, count: s32) {
+//     assert(back_slice(rb).count >= count);
+//     end += count;
+// }
+
+IO_Buffer_Pair :: struct {
+    front: IO_Buffer;
+    back: IO_Buffer;
+}
+
+net_buf_in : struct {
+    front: struct {
+        data: Ring_Buffer;
+        packet_size: s32;
+    };
+    back: IO_Buffer;
+};
+
+net_buf_out : IO_Buffer_Pair;
+
+Network_Packet_Header :: struct {
     mouse: Vector2;
-    entity: Entity;
-    footer : [8] u8 = xx "]]tekcap";
-}
-Network_Packet_Piece :: struct {
-    data: Network_Packet;
-    size: s32;
-}
+    ship_pos: Vector2;
+    ship_rot: f32;
+} #no_padding;
 
 f32 :: float32;
 f64 :: float64;
@@ -884,6 +1296,48 @@ array_equals :: (lhs: [$N] $T, rhs: [N] T) -> bool {
         if rhs[it_index] != it return false;
     }
     return true;
+}
+
+advance :: inline (a: *[] $T, count: s64) {
+    pretty_assert(count >= 0);
+    pretty_assert(a.count >= count);
+    a.count -= count;
+    a.data  += count;
+}
+
+advance :: inline (a: [] $T, count: s64) -> [] T #must {
+    pretty_assert(count >= 0);
+    pretty_assert(a.count >= count);
+
+    res: [] $T = ---;
+    res.count = a.count - count;
+    res.data  = a.data  + count;
+    return res;
+}
+
+copy :: inline (p: *u8, v: *$T) {
+    memcpy(p, v, size_of(T));
+}
+
+string_view :: inline (s: string, index: s64, count: s64 = -1) -> string {
+    assert(index >= 0, "index = %", index);
+    if count < 0 {
+        c: string = ---;
+        c.data    = s.data + index;
+        c.count   = s.count - index;
+        return c;
+    }
+
+    if index >= s.count  return "";
+
+    if index + count > s.count {
+        count = s.count - index;
+    }
+
+    c: string = ---;
+    c.data    = s.data + index;
+    c.count   = count;
+    return c;
 }
 
 hsv_to_rgb :: (cx: float, cy: float, cz: float) -> (r: float, g: float, b: float) {
@@ -938,6 +1392,144 @@ do_debug_break :: () {
     debug_break();
 }
 
+Mem_Dump :: #type,distinct [] u8;
+mem_dump_printer :: (builder: *String_Builder, any: Any, data: *void) -> handled: bool {
+    if any.type != type_info(Mem_Dump) return false;
+
+    data := << cast(*[] u8) any.value_pointer;
+    mem_dump_to_builder(builder, data);
+    return true;
+}
+
+Setup_Mem_Dump_Printer :: () #expand {
+    old_struct_printer := context.print_style.struct_printer;
+    `defer context.print_style.struct_printer = old_struct_printer;
+    context.print_style.struct_printer = mem_dump_printer;
+}
+
+mem_dump_to_builder :: (builder: *String_Builder, data: [] u8) {
+    old_default_format_int := context.print_style.default_format_int;
+    defer context.print_style.default_format_int = old_default_format_int;
+    context.print_style.default_format_int = FormatInt.{ base = 16, minimum_digits = 2 };
+
+    leading_spaces := cast(s64) (cast(u64) data.data) % 16;
+    start_addr := cast(* u8) (cast(u64) data.data) & 0xffff_ffff_ffff_fff0;
+
+    print_to_builder(builder, "%: ", start_addr);
+    for 0..(data.count + leading_spaces - 1) {
+        if it < leading_spaces then
+            append(builder, "  ");
+        else
+            print_to_builder(builder, "%", data[it - leading_spaces]);
+
+        if (it + 1) % 16 == 0 && it + 1 != data.count + leading_spaces
+            print_to_builder(builder, "\n%: ", start_addr + it + 1);
+        else if (it + 1) % 4 == 0
+            append(builder, " ");
+    }
+}
+
+code_to_string :: (code: Code) -> string {
+    #import "Program_Print";
+    #import "Compiler";
+    root := compiler_get_nodes(code);
+    builder : String_Builder;
+    builder.allocator = temporary_allocator;
+    print_expression(*builder, root);
+    return builder_to_string(*builder);
+}
+
+dbg_to_builder :: (builder: *String_Builder, code: Code) #expand {
+    print_to_builder(builder, "% = %\n", #run code_to_string(code), #insert code);
+}
+
+log_dbg :: (code: Code) #expand {
+    log("% = %\n", #run code_to_string(code), #insert code);
+}
+
+dbg :: (code: Code) #expand {
+    print("% = %\n", #run code_to_string(code), #insert code);
+}
+
+// Constant structs don't work with compile time constructs yet, so we return
+// all fields directly
+get_expr_info :: (code: Code) -> kind: Code_Node.Kind, op_type: s32, full_expr: string, proc_expr: string, lhs: Code, rhs: Code {
+    #import "Program_Print";
+
+    root := compiler_get_nodes(code);
+
+    builder: String_Builder;
+    print_expression(*builder, root);
+    full_expr := builder_to_string(*builder);
+
+    if root.kind == {
+        case .BINARY_OPERATOR;
+            binop := cast(*Code_Binary_Operator) root;
+            op_type := binop.operator_type;
+            lhs := compiler_get_code(binop.left, code);
+            rhs := compiler_get_code(binop.right, code);
+            return xx root.kind, op_type, full_expr, "", lhs, rhs;
+
+        case .PROCEDURE_CALL;
+            proccall := cast(*Code_Procedure_Call) root;
+            if proccall.arguments_sorted.count != 2 {
+                dummy : Code = #code null;
+                return xx root.kind, -1, full_expr, "", dummy, dummy;
+            }
+
+            builder: String_Builder;
+            print_expression(*builder, proccall.procedure_expression);
+            proc_expr := builder_to_string(*builder);
+
+            lhs := compiler_get_code(proccall.arguments_sorted[0], code);
+            rhs := compiler_get_code(proccall.arguments_sorted[1], code);
+            return xx root.kind, -1, full_expr, proc_expr, lhs, rhs;
+
+        case;
+
+    }
+
+    dummy : Code = #code null;
+    return xx root.kind, -1, full_expr, "", dummy, dummy;
+}
+
+pretty_assert :: (code: Code, loc := #caller_location) #expand {
+    if #insert code return;
+
+    if context.handling_assertion_failure  return;  // Avoid infinite loops.
+    context.handling_assertion_failure = true;
+
+    kind, op_type, full_expr, proc_expr, lhs, rhs :: #run get_expr_info(code);
+
+    message := "";
+
+    #if kind == .BINARY_OPERATOR {
+        builder : String_Builder;
+        builder.allocator = temporary_allocator;
+
+        print_to_builder(*builder, "(%) = (% ", full_expr, #insert lhs);
+
+        if op_type < 128 {
+            append(*builder, cast(u8) op_type);
+        } else {
+            append(*builder, operator_to_string(xx op_type));
+        }
+
+        print_to_builder(*builder, " %) = false", #insert rhs);
+        message = builder_to_string(*builder, temporary_allocator);
+    } else #if kind == .PROCEDURE_CALL {
+        message = tprint("(%) = (%(%, %)) = false", full_expr, proc_expr, #insert lhs, #insert rhs);
+    } else {
+        message = tprint("(%) = false", full_expr);
+    }
+
+    // We provide 'loc' in case _STACK_TRACE is turned off, but assertion_failed may well
+    // look at the stack trace if it is available.
+    context.assertion_failed(loc, message);
+    context.handling_assertion_failure = false;
+
+} @NoProfile
+
 #import "Basic";
 #import "Math";
 Simp :: #import "Simp";
@@ -947,3 +1539,4 @@ GetRect :: #import "GetRect";
 using Sock :: #import "Socket";
 #import "System";
 #import "Random";
+#import "Compiler";
