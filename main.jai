@@ -399,21 +399,21 @@ main :: () {
             ship.base = last_received.ship;
 
             waves := *entities[their_index].wave_spawner.waves;
-            for 0..last_received.waves_count-1 {
-                waves.*[it].base = last_received.waves[it];
+            for 0..last_received.waves.count-1 {
+                waves.*[it].base = last_received.waves.data[it];
                 waves.*[it].is_enabled = true;
             }
-            for last_received.waves_count..waves.count-1 {
+            for last_received.waves.count..waves.count-1 {
                 waves.*[it].is_enabled = false;
             }
 
             if !am_server {
                 coins := *coin_spawner.coins;
-                for 0..last_received.coins_count-1 {
-                    coins.*[it].base = last_received.coins[it];
+                for 0..last_received.coins.count-1 {
+                    coins.*[it].base = last_received.coins.data[it];
                     coins.*[it].is_enabled = true;
                 }
-                for last_received.coins_count..coins.count-1 {
+                for last_received.coins.count..coins.count-1 {
                     coins.*[it].is_enabled = false;
                 }
             }
@@ -585,6 +585,9 @@ main :: () {
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Network IO
+
+        prepare_pending_out_packet();
+
         frame_budget_secs := 1.0 / 60;
         networking(time_start + frame_budget_secs);
 
@@ -821,9 +824,10 @@ networking :: (deadline: f64) {
 
     if !connecting {
         // Serialize current state to the front buffer
-        net_buf_out.front.pending = serialize_to_send(net_buf_out.front.capacity, my_index);
+        net_buf_out.front.pending = serialize_pending_packet(net_buf_out.front.capacity, my_index);
 
         while true {
+            // TODO: limit frequency if nothing is received
             // if get_time() < last_packet_sent_time + 1 / cast(float) packets_sent_per_second break;
             if disconnected return;
             Check_Timeout();
@@ -832,7 +836,7 @@ networking :: (deadline: f64) {
                 Swap(*net_buf_out.front, *net_buf_out.back);
                 if !net_buf_out.back.pending break;
                 sync += 1;
-                copy(net_buf_out.back.pending.data + 4, *sync);
+                copy(net_buf_out.back.pending.data + sync_offset_in_header, *sync);
             }
 
             n_bytes_sent, _disconnected := send_slice(net_buf_out.back.pending);
@@ -916,25 +920,6 @@ networking :: (deadline: f64) {
 sync : s32 = 0;
 last_time_received_something : f64 = -1;
 
-MAGIC :: u8.[ 0xb0, 0x00, 0xb1, 0xe5 ];
-
-Packet_Header :: struct {
-    magic: type_of(MAGIC) = MAGIC;
-    sync: s32;
-    packet_size: s32;
-} #no_padding;
-#assert size_of(Packet_Header) == 12;
-
-read_packet_header :: (buffer: [] u8) -> packet_size: s32 {
-    if buffer.count < size_of(Packet_Header) then return -1;
-
-    header: Packet_Header = ---;
-    memcpy(*header, buffer.data, size_of(Packet_Header));
-    pretty_assert(array_equals(header.magic, MAGIC));
-
-    return header.packet_size;
-}
-
 send_slice :: (slice: [] u8) -> n_bytes_sent: s64, need_reconnect : bool {
     rc := send(conn_sock, slice.data, xx slice.count, 0);
     if rc < 0 {
@@ -978,7 +963,11 @@ receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
     return rc, false;
 }
 
-serialize_to_send :: (buffer: [] u8, entity_id: s32) -> written_slice: [] u8 {
+//////////////////////////////////////////////////////////////////////////////////////////////
+// encode/decode
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+serialize_pending_packet :: (buffer: [] u8, entity_id: s32) -> written_slice: [] u8 {
     copy_and_advance :: (slice: *[] u8, v: *$T) #expand {
         assert(slice.count >= size_of(T));
         memcpy(slice.data, v, size_of(T));
@@ -987,61 +976,30 @@ serialize_to_send :: (buffer: [] u8, entity_id: s32) -> written_slice: [] u8 {
 
     slice := buffer;
 
+    header : Packet_Header;
+    assert(encode_or_decode_struct(*slice, *header, .ENCODE));
 
-    copy_and_advance(*slice, *MAGIC);
+    assert(encode_or_decode_struct(*slice, *pending_out_packet.mouse, .ENCODE));
+    assert(encode_or_decode_struct(*slice, *pending_out_packet.ship, .ENCODE));
 
-    sync: s32 = 0;
-    copy_and_advance(*slice, *sync);
-
-    packet_size : s32 = 0;
-    p_packet_size := slice.data;
-    copy_and_advance(*slice, *packet_size);
-
-
-    copy_and_advance(*slice, *cast([4] u8) "\x11\x11\x11\x11");
-    copy_and_advance(*slice, *mouses[entity_id]);
-    ship := *entities[entity_id];
-    copy_and_advance(*slice, *cast([4] u8) "\x22\x22\x22\x22");
-    copy_and_advance(*slice, *ship.pos);
-    copy_and_advance(*slice, *ship.rot);
-
-
-    waves_count : s32 = 0;
-    copy_and_advance(*slice, *cast([4] u8) "\x33\x33\x33\x33");
-    p_waves_count := slice.data;
-    copy_and_advance(*slice, *waves_count);
-    for * wave: ship.wave_spawner.waves {
-        if !wave.is_enabled continue;
-
-        waves_count += 1;
-        copy_and_advance(*slice, *wave.origin);
-        copy_and_advance(*slice, *wave.outer_radius);
-        copy_and_advance(*slice, *wave.strength);
+    {
+        magic : [4] u8 = xx "\x11\x11\x11\x11";
+        assert(encode_or_decode_polymorphic(*slice, *magic, .ENCODE));
     }
-    copy(p_waves_count, *waves_count);
+    assert(encode_or_decode_variable_length_array(*slice, *pending_out_packet.waves, .ENCODE));
 
-
-    coins_count : s32 = 0;
-    copy_and_advance(*slice, *cast([4] u8) "\x44\x44\x44\x44");
-    p_coins_count := slice.data;
-    copy_and_advance(*slice, *coins_count);
-    if am_server {
-        for * coin: coin_buffer {
-            if !coin.is_enabled continue;
-
-            coins_count += 1;
-            copy_and_advance(*slice, *coin.origin);
-        }
-        copy(p_coins_count, *coins_count);
+    {
+        magic : [4] u8 = xx "\x22\x22\x22\x22";
+        assert(encode_or_decode_polymorphic(*slice, *magic, .ENCODE));
     }
-
+    assert(encode_or_decode_variable_length_array(*slice, *pending_out_packet.coins, .ENCODE));
 
     res: [] u8 = ---;
     res.data = buffer.data;
     res.count = slice.data - buffer.data;
 
-    packet_size = xx res.count;
-    copy(p_packet_size, *packet_size);
+    packet_size : s32 = xx res.count;
+    copy(buffer.data + packet_size_offset_in_header, *packet_size);
 
     return res;
 }
@@ -1055,72 +1013,175 @@ deserialize_received_data :: (buffer: [] u8, entity_id: s32) -> n_bytes_consumed
 
     slice := buffer;
 
+    header : Packet_Header = ---;
+    if !encode_or_decode_struct(*slice, *header, .DECODE) return 0, false;
+    assert(array_equals(header.magic, MAGIC));
 
-    magic : [4] u8;
-    try_read_and_advance(*slice, *magic);
-    assert(array_equals(magic, MAGIC));
-    // log("read magic");
+    if !encode_or_decode_struct(*slice, *last_received.mouse, .DECODE) return 0, false;
+    if !encode_or_decode_struct(*slice, *last_received.ship, .DECODE) return 0, false;
 
-    sync: s32;
-    try_read_and_advance(*slice, *sync);
-    // log_dbg(sync);
-
-    packet_size : s32;
-    try_read_and_advance(*slice, *packet_size);
-    // log_dbg(packet_size);
-
-
-    try_read_and_advance(*slice, *magic);
-    assert(array_equals(magic, xx "\x11\x11\x11\x11"));
-    try_read_and_advance(*slice, *last_received.mouse);
-    // log_dbg(last_received.mouse);
-
-    try_read_and_advance(*slice, *magic);
-    assert(array_equals(magic, xx "\x22\x22\x22\x22"));
-    try_read_and_advance(*slice, *last_received.ship.pos);
-    // log_dbg(last_received.ship.pos);
-    try_read_and_advance(*slice, *last_received.ship.rot);
-    // log_dbg(last_received.ship.rot);
-
-
-    try_read_and_advance(*slice, *magic);
-    assert(array_equals(magic, xx "\x33\x33\x33\x33"));
-    try_read_and_advance(*slice, *last_received.waves_count);
-    // log_dbg(last_received.waves_count);
-    assert(last_received.waves_count <= last_received.waves.count);
-    for 0..last_received.waves_count-1 {
-        wave := *last_received.waves[it];
-        try_read_and_advance(*slice, *wave.origin);
-        try_read_and_advance(*slice, *wave.outer_radius);
-        try_read_and_advance(*slice, *wave.strength);
-        // log_dbg(it);
-        // log_dbg(wave.*);
+    {
+        magic : [4] u8 = ---;
+        if !encode_or_decode_polymorphic(*slice, *magic, .DECODE) return 0, false;
+        assert(array_equals(magic, xx "\x11\x11\x11\x11"));
     }
+    if !encode_or_decode_variable_length_array(*slice, *last_received.waves, .DECODE) return 0, false;
 
-    try_read_and_advance(*slice, *magic);
-    assert(array_equals(magic, xx "\x44\x44\x44\x44"));
-    try_read_and_advance(*slice, *last_received.coins_count);
-    // log_dbg(last_received.coins_count);
-    assert(last_received.coins_count <= last_received.coins.count);
-    for 0..last_received.coins_count-1 {
-        coin := *last_received.coins[it];
-        try_read_and_advance(*slice, *coin.origin);
-        // log_dbg(it);
-        // log_dbg(coin.origin);
+    {
+        magic : [4] u8 = ---;
+        if !encode_or_decode_polymorphic(*slice, *magic, .DECODE) return 0, false;
+        assert(array_equals(magic, xx "\x22\x22\x22\x22"));
     }
+    if !encode_or_decode_variable_length_array(*slice, *last_received.coins, .DECODE) return 0, false;
 
     last_received.ready = true;
     n_bytes_consumed := slice.data - buffer.data;
     return xx n_bytes_consumed, true;
 }
 
+//
+// primitives
+//
+
+Coding_Mode :: enum {
+    ENCODE;
+    DECODE;
+}
+
+encode_or_decode_polymorphic :: (slice: *[] u8, value: *$T, mode: Coding_Mode) -> ok: bool {
+    #if #run (cast(*Type_Info) T).type == .STRUCT {
+        #if #run (cast(*Type_Info_Struct) T).polymorph_source_struct == xx Variable_Length_Array {
+            return encode_or_decode_variable_length_array(slice, value, mode);
+        } else {
+            return encode_or_decode_struct(slice, value, mode);
+        }
+    } else {
+        if slice.count < size_of(T) return false;
+        if mode == {
+            case .ENCODE; memcpy(slice.data, value, size_of(T));
+            case .DECODE; memcpy(value, slice.data, size_of(T));
+        }
+        advance(slice, size_of(T));
+        return true;
+    }
+}
+
+encode_or_decode_variable_length_array :: (slice: *[] u8, value: *Variable_Length_Array, mode: Coding_Mode) -> ok: bool {
+    size_of_count :: size_of(type_of(value.count));
+    if slice.count < size_of_count return false;
+    if mode == {
+        case .ENCODE; memcpy(slice.data, *value.count, size_of_count);
+        case .DECODE; memcpy(*value.count, slice.data, size_of_count);
+    }
+    advance(slice, size_of_count);
+
+    size_of_elem :: size_of(type_of(value).T);
+    if slice.count < value.count * size_of_elem return false;
+
+    for 0..value.count-1 {
+        if !encode_or_decode_polymorphic(slice, *value.data[it], mode) return false;
+    }
+
+    return true;
+}
+
+encode_or_decode_struct :: (slice: *[] u8, value: *$T, mode: Coding_Mode) -> ok: bool
+#modify { return (cast(*Type_Info) T).type == .STRUCT; }
+{
+    #insert #run -> string {
+        sb: String_Builder;
+
+        ti := cast(*Type_Info_Struct) T;
+        for member: ti.members {
+            print_to_builder(*sb, #string END
+
+    if !encode_or_decode_polymorphic(slice, *value.%, mode) return false;
+
+            END, member.name);
+        }
+
+        return builder_to_string(*sb);
+    };
+
+    return true;
+}
+
+read_packet_header :: (buffer: [] u8) -> packet_size: s32 {
+    if buffer.count < size_of(Packet_Header) then return -1;
+
+    header: Packet_Header = ---;
+    memcpy(*header, buffer.data, size_of(Packet_Header));
+    pretty_assert(array_equals(header.magic, MAGIC));
+
+    return header.packet_size;
+}
+
+prepare_pending_out_packet :: () {
+    ship := *entities[my_index];
+    pending_out_packet.ship = ship.base;
+    pending_out_packet.mouse = mouses[my_index];
+
+    max_waves_count :: type_of(pending_out_packet.waves).max_count;
+    i := 0;
+    for * wave: ship.wave_spawner.waves {
+        if !wave.is_enabled continue;
+        if i > max_waves_count break;
+
+        pending_out_packet.waves.data[i] = wave.base;
+        i += 1;
+    }
+    pending_out_packet.waves.count = xx i;
+
+    max_coins_count :: type_of(pending_out_packet.coins).max_count;
+    i = 0;
+    if am_server {
+        for * coin: coin_buffer {
+            if !coin.is_enabled continue;
+            if i > max_coins_count break;
+
+            pending_out_packet.coins.data[i] = coin.base;
+            i += 1;
+        }
+    }
+    pending_out_packet.coins.count = xx i;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+//
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+Variable_Length_Array :: struct(max_count: s64, T: Type) {
+    count: s32;
+    data: [max_count] T;
+}
+
+
+MAGIC :: u8.[ 0xb0, 0x00, 0xb1, 0xe5 ];
+
+Packet_Header :: struct {
+    magic: type_of(MAGIC) = MAGIC;
+    sync: s32;
+    packet_size: s32;
+} #no_padding;
+#assert size_of(Packet_Header) == 12;
+
+sync_offset_in_header :: #run member_offset_in_bytes(Packet_Header, "sync");
+packet_size_offset_in_header :: #run member_offset_in_bytes(Packet_Header, "packet_size");
+
+Packet_Contents :: struct {
+    header: Packet_Header;
+
+    mouse: Vector2;
+    ship: Entity.Base;
+
+    waves: Variable_Length_Array(MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY, CircleWave.Base);
+    coins: Variable_Length_Array(coin_buffer.count, Coin.Base);
+}
+
+pending_out_packet : Packet_Contents;
+
 last_received : struct {
-    ship : Entity.Base;
-    mouse : Vector2;
-    waves : [MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY] CircleWave.Base;
-    waves_count : s32;
-    coins : [coin_buffer.count] Coin.Base;
-    coins_count : s32;
+    using packet : Packet_Contents;
     ready : bool;
 };
 
@@ -1156,12 +1217,6 @@ IO_Buffer_Pair :: struct {
 
 net_buf_in : IO_Buffer_Pair;
 net_buf_out : IO_Buffer_Pair;
-
-Network_Packet_Header :: struct {
-    mouse: Vector2;
-    ship_pos: Vector2;
-    ship_rot: f32;
-} #no_padding;
 
 f32 :: float32;
 f64 :: float64;
@@ -1214,6 +1269,47 @@ string_view :: inline (s: string, index: s64, count: s64 = -1) -> string {
     c.count   = count;
     return c;
 }
+
+member_offset_in_bytes :: (type: Type, member: string) -> s32 {
+    {
+        ti := cast(*Type_Info) type;
+        assert(ti.type == .STRUCT);
+    }
+    ti := cast(*Type_Info_Struct) type;
+    for ti.members if it.name == member return xx it.offset_in_bytes;
+    assert(false);
+    return -1;
+}
+
+member_default_value :: (type: Type, member: string) -> Any {
+    {
+        ti := cast(*Type_Info) type;
+        assert(ti.type == .STRUCT);
+    }
+    ti := cast(*Type_Info_Struct) type;
+
+    default := Dynamic_New(type, initialized = true, allocator = temp);
+
+    for ti.members if it.name == member {
+        result : Any = ---;
+        result.value_pointer = alloc(it.type.runtime_size);
+        memcpy(result.value_pointer, default + it.offset_in_bytes, it.type.runtime_size);
+        result.type = it.type;
+        return result;
+    }
+    assert(false);
+    return -1;
+}
+
+// #run { set_build_options_dc(.{ do_output = false });
+//     log_dbg(member_default_value(Packet_Header, "magic"));
+//     any := member_default_value(Packet_Header, "magic");
+//     sb: String_Builder;
+//     print_type_to_builder(*sb, any.type);
+//     write_builder(*sb);
+//     default : [4] u8 = .[1, 2, 3, 4];
+//     log_dbg(default);
+// }
 
 hsv_to_rgb :: (cx: float, cy: float, cz: float) -> (r: float, g: float, b: float) {
     cx /= 360.0;
