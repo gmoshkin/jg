@@ -828,7 +828,7 @@ networking :: (deadline: f64) {
 
         while true {
             // TODO: limit frequency if nothing is received
-            // if get_time() < last_packet_sent_time + 1 / cast(float) packets_sent_per_second break;
+            if get_time() < last_packet_sent_time + 1 / cast(float) packets_sent_per_second break;
             if disconnected return;
             Check_Timeout();
 
