@@ -1,3 +1,5 @@
+#run { set_build_options_dc(.{ output_executable_name = "jg" }); }
+
 main :: () {
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -133,10 +135,11 @@ main :: () {
     coin_spawner = .{ coins = coin_buffer };
 
     // Init network buffers
-    net_buf_out.front.capacity    = array_view(net_buffer, BUFFER_SIZE * 0, BUFFER_SIZE);
-    net_buf_out.back.capacity     = array_view(net_buffer, BUFFER_SIZE * 1, BUFFER_SIZE);
-    net_buf_in.front.data.backing = array_view(net_buffer, BUFFER_SIZE * 2, BUFFER_SIZE);
-    net_buf_in.back.capacity      = array_view(net_buffer, BUFFER_SIZE * 3, BUFFER_SIZE * 5);
+    net_buf_out.front.capacity = array_view(net_buffer, BUFFER_SIZE * 0, BUFFER_SIZE);
+    net_buf_out.back.capacity  = array_view(net_buffer, BUFFER_SIZE * 1, BUFFER_SIZE);
+    net_buf_in.front.capacity  = array_view(net_buffer, BUFFER_SIZE * 2, BUFFER_SIZE);
+    net_buf_in.front.pending   = array_view(net_buf_in.front.capacity, 0, 0);
+    net_buf_in.back.capacity   = array_view(net_buffer, BUFFER_SIZE * 3, BUFFER_SIZE * 5);
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Game loop
@@ -812,8 +815,7 @@ networking :: (deadline: f64) {
             connecting = true;
 
             net_buf_out.back.pending.count = 0;
-            reset(*net_buf_in.front.data);
-            net_buf_in.front.packet_size = 0;
+            net_buf_in.front.pending.count = 0;
         }
     }
 
@@ -861,59 +863,52 @@ networking :: (deadline: f64) {
             if disconnected return;
             Check_Timeout();
 
-            n_bytes_received, _disconnected := receive_slice(net_buf_in.back.capacity);
+            using net_buf_in;
+            n_bytes_received, _disconnected := receive_slice(back.capacity);
             disconnected |= _disconnected;
 
-            if n_bytes_received {
+            received_slice := array_view(back.capacity, 0, n_bytes_received);
+            if received_slice {
                 Setup_Mem_Dump_Printer();
                 log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
                 log("received data:");
-                log("%", cast(Mem_Dump) array_view(net_buf_in.back.capacity, 0, n_bytes_received));
+                log("%", cast(Mem_Dump) received_slice);
                 log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
             }
 
-            if !n_bytes_received break;
+            if !received_slice break;
 
             last_time_received_something = get_time();
 
             // Didn't fill up the buffer -> received all there was to receive
-            if n_bytes_received != net_buf_in.back.capacity.count then should_be_receiving_packets = false;
+            if received_slice.count != back.capacity.count then should_be_receiving_packets = false;
 
-            received_slice := array_view(net_buf_in.back.capacity, 0, n_bytes_received);
             while received_slice {
-                log_dbg(net_buf_in.front.packet_size);
-                packet_piece_size := 0;
-                if net_buf_in.front.packet_size {
-                    packet_piece_size = net_buf_in.front.packet_size - count(*net_buf_in.front.data);
-                } else {
-                    packet_size := read_packet_header(received_slice);
-                    log_dbg(packet_size);
-                    pretty_assert(packet_size > 0);
-                    net_buf_in.front.packet_size = packet_size;
+                log_dbg(front.pending.count);
 
-                    packet_piece_size = min(packet_size, xx received_slice.count);
-                }
-                log_dbg(packet_piece_size);
-                packet_piece := array_view(received_slice, 0, packet_piece_size);
-                append(*net_buf_in.front.data, packet_piece);
-                advance(*received_slice, packet_piece_size);
+                packet_size := read_packet_header(front.pending);
+                log_dbg(packet_size);
+                size_to_copy_wanted := 0;
+                ifx packet_size < 0 // Not enough data in pending.
+                    size_to_copy_wanted = size_of(Packet_Header) - front.pending.count;
+                else
+                    size_to_copy_wanted = packet_size - front.pending.count;
 
-                ring_buffer_count := count(*net_buf_in.front.data);
-                log_dbg(ring_buffer_count);
-                log_dbg(net_buf_in.front.packet_size);
-                if ring_buffer_count != net_buf_in.front.packet_size break;
+                size_to_copy := min(size_to_copy_wanted, xx received_slice.count);
+                memcpy(front.pending.data + front.pending.count, received_slice.data, size_to_copy);
+                front.pending.count += size_to_copy;
+                advance(*received_slice, size_to_copy);
 
-                n_bytes_consumed, consumed := deserialize_received_data(net_buf_in.front.data.backing, their_index);
+                if packet_size < 0 continue; // Retry reading packet header.
+
+                if front.pending.count < packet_size break; // Not enough data received.
+                pretty_assert(front.pending.count == packet_size);
+
+                n_bytes_consumed, consumed := deserialize_received_data(front.pending, their_index);
                 assert(consumed);
-                pretty_assert(n_bytes_consumed == count(*net_buf_in.front.data));
-
-                reset(*net_buf_in.front.data);
-                net_buf_in.front.packet_size = 0;
+                pretty_assert(n_bytes_consumed == front.pending.count);
+                front.pending.count = 0;
             }
-        }
-
-        if last_time_received_something > 0 && get_time() - last_time_received_something > 1 {
-            debug_break();
         }
     }
 }
@@ -921,17 +916,23 @@ networking :: (deadline: f64) {
 sync : s32 = 0;
 last_time_received_something : f64 = -1;
 
+MAGIC :: u8.[ 0xb0, 0x00, 0xb1, 0xe5 ];
+
+Packet_Header :: struct {
+    magic: type_of(MAGIC) = MAGIC;
+    sync: s32;
+    packet_size: s32;
+} #no_padding;
+#assert size_of(Packet_Header) == 12;
+
 read_packet_header :: (buffer: [] u8) -> packet_size: s32 {
-    if buffer.count < 16 then return -1;
+    if buffer.count < size_of(Packet_Header) then return -1;
 
-    magic : [4] u8;
-    memcpy(magic.data, buffer.data, size_of(type_of(magic)));
-    pretty_assert(array_equals(magic, MAGIC));
+    header: Packet_Header = ---;
+    memcpy(*header, buffer.data, size_of(Packet_Header));
+    pretty_assert(array_equals(header.magic, MAGIC));
 
-    packet_size : s32;
-    memcpy(*packet_size, buffer.data + 4 + 4, size_of(s32));
-
-    return packet_size;
+    return header.packet_size;
 }
 
 send_slice :: (slice: [] u8) -> n_bytes_sent: s64, need_reconnect : bool {
@@ -976,8 +977,6 @@ receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
 
     return rc, false;
 }
-
-MAGIC :: u8.[ 0xb0, 0x00, 0xb1, 0xe5 ];
 
 serialize_to_send :: (buffer: [] u8, entity_id: s32) -> written_slice: [] u8 {
     copy_and_advance :: (slice: *[] u8, v: *$T) #expand {
@@ -1144,142 +1143,18 @@ IO_Buffer :: struct {
     pending: [] u8;
 }
 
-/*
-
-empty:
-[. . . . . . . .]
- ^
- end:0
- start:0
- empty = true
-
-push_back(1):
-[1 . . . . . . .]
- ^ ^
- | end:1
- start:0
- empty = false
-
-push_back(2):
-[1 2 . . . . . .]
- ^   ^
- |   end:2
- start:0
- empty = false
-
-pop_front() -> 1:
-[. 2 . . . . . .]
-   ^ ^
-   | end:2
-   start:1
- empty = false
-
-push_front(3):
-[3 2 . . . . . .]
- ^   ^
- |   end:2
- start:0
- empty = false
-
-push_front(4):
-[3 2 . . . . . 4]
-     ^         ^
-     end:2     |
-               start:7
- empty = false
-
-push_front(5),
-push_back(6),
-push_front(8),
-push_back(7),
-push_back(0):
-[3 2 6 7 0 8 5 4]
-           ^
-           end:
-           start
- empty = false
-
-pop_front() -> 8:
-[3 2 6 7 0 . 5 4]
-           ^ ^
-           end:5
-             start:6
-
- */
-Ring_Buffer :: struct {
-    backing: [] u8;
-    start: s32;
-    end: s32;
-    // TODO: store count directly instead
-    is_empty: bool = true;
+append :: inline (using buffer: *IO_Buffer, slice: [] u8) {
+    pretty_assert(capacity.count >= pending.data - capacity.data + pending.count + slice.count);
+    memcpy(pending.data, slice.data, slice.count);
+    pending.count += slice.count;
 }
-
-reset :: inline (using rb: *Ring_Buffer) {
-    start, end = 0;
-    is_empty = true;
-}
-
-is_empty :: inline (using rb: *Ring_Buffer) -> bool {
-    return is_empty;
-}
-
-is_full :: inline (using rb: *Ring_Buffer) -> bool {
-    return start == end && !is_empty;
-}
-
-count :: inline (using rb: *Ring_Buffer) -> s32 {
-    if is_empty         return 0;
-    else if end > start return end - start;
-    else                return end - start + xx backing.count;
-}
-
-capacity :: inline (using rb: *Ring_Buffer) -> s32 {
-    return xx backing.count - count(rb);
-}
-
-push_back :: inline (using rb: *Ring_Buffer, v: u8) {
-    assert(capacity(rb) >= 1);
-    backing[end] = v;
-    end = (end + 1) % xx backing.count;
-    is_empty = false;
-}
-
-append :: inline (using rb: *Ring_Buffer, data: [] u8) {
-    assert(capacity(rb) >= data.count);
-    // TODO: optimize
-    for data push_back(rb, it);
-}
-
-// // May not return all the free space in the buffer, because you know why
-// back_slice :: (using rb: *Ring_Buffer) -> [] u8 {
-//     res : u8[] = ---;
-//     res.data = backing.data + end;
-//     if end >= start then
-//         // TODO: if end == count
-//         res.count = (backing.count - end) * is_empty;
-//     else
-//         res.count = start - end;
-//     return res;
-// }
-
-// advance_back :: (using rb: *Ring_Buffer, count: s32) {
-//     assert(back_slice(rb).count >= count);
-//     end += count;
-// }
 
 IO_Buffer_Pair :: struct {
     front: IO_Buffer;
     back: IO_Buffer;
 }
 
-net_buf_in : struct {
-    front: struct {
-        data: Ring_Buffer;
-        packet_size: s32;
-    };
-    back: IO_Buffer;
-};
-
+net_buf_in : IO_Buffer_Pair;
 net_buf_out : IO_Buffer_Pair;
 
 Network_Packet_Header :: struct {
