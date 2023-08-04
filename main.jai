@@ -349,7 +349,8 @@ main :: () {
         time_now = get_time();
 
         assert(Coin_Spawner_Parameters.max_live_ones < coin_buffer.count);
-        if time_now > coin_spawner.time_when_last_one_spawned + Coin_Spawner_Parameters.spawn_period
+        if (am_server || !have_human_player)
+            && time_now > coin_spawner.time_when_last_one_spawned + Coin_Spawner_Parameters.spawn_period
             && coin_spawner.n_live_ones < Coin_Spawner_Parameters.max_live_ones
         {
             using coin_spawner;
@@ -373,14 +374,18 @@ main :: () {
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // Coin collisions
 
-        for * ship, ship_index: entities {
-            for * coin: coin_buffer {
-                if !coin.is_enabled then continue;
-                if distance(coin.origin, ship.pos) > coin.radius + ship.collision_radius then continue;
-                coin.is_enabled = false;
-                score_board.points[ship_index] += 1;
-                coin_spawner.n_live_ones -= 1;
+        if am_server || !have_human_player {
+            for * ship, ship_index: entities {
+                for * coin: coin_buffer {
+                    if !coin.is_enabled then continue;
+                    if distance(coin.origin, ship.pos) > coin.radius + ship.collision_radius then continue;
+                    coin.is_enabled = false;
+                    score_board.points[ship_index] += 1;
+                    coin_spawner.n_live_ones -= 1;
+                }
             }
+        } else {
+            score_board = last_received.score_board;
         }
 
 
@@ -989,6 +994,7 @@ serialize_pending_packet :: (buffer: [] u8, entity_id: s32) -> written_slice: []
 
     assert(encode_or_decode_struct(*slice, *pending_out_packet.mouse, .ENCODE));
     assert(encode_or_decode_struct(*slice, *pending_out_packet.ship, .ENCODE));
+    assert(encode_or_decode_struct(*slice, *pending_out_packet.score_board, .ENCODE));
 
     {
         magic : [4] u8 = xx "\x11\x11\x11\x11";
@@ -1027,6 +1033,7 @@ deserialize_received_data :: (buffer: [] u8, entity_id: s32) -> n_bytes_consumed
 
     if !encode_or_decode_struct(*slice, *last_received.mouse, .DECODE) return 0, false;
     if !encode_or_decode_struct(*slice, *last_received.ship, .DECODE) return 0, false;
+    if !encode_or_decode_struct(*slice, *last_received.score_board, .DECODE) return 0, false;
 
     {
         magic : [4] u8 = ---;
@@ -1128,6 +1135,7 @@ prepare_pending_out_packet :: () {
     ship := *entities[my_index];
     pending_out_packet.ship = ship.base;
     pending_out_packet.mouse = mouses[my_index];
+    pending_out_packet.score_board = score_board;
 
     max_waves_count :: type_of(pending_out_packet.waves).max_count;
     i := 0;
@@ -1182,6 +1190,7 @@ Packet_Contents :: struct {
     mouse: Vector2;
     ship: Entity.Base;
 
+    score_board: Score_Board;
     waves: Variable_Length_Array(MAX_CIRCLE_WAVES_VISIBLE_AT_A_TIME_PER_ENTITY, CircleWave.Base);
     coins: Variable_Length_Array(coin_buffer.count, Coin.Base);
 }
@@ -1225,6 +1234,10 @@ IO_Buffer_Pair :: struct {
 
 net_buf_in : IO_Buffer_Pair;
 net_buf_out : IO_Buffer_Pair;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// util
+//////////////////////////////////////////////////////////////////////////////////////////////
 
 f32 :: float32;
 f64 :: float64;
