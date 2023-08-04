@@ -127,6 +127,10 @@ main :: () {
     assert(entities.count == 2, "TODO");
 
     coin_spawner = .{ coins = coin_buffer };
+    for * coin_spawner.coins {
+        it.radius = Coin_Spawner_Parameters.default_radius;
+        it.color = Coin_Spawner_Parameters.default_color;
+    }
 
     // Init network buffers
     net_buf_out.front.capacity = array_view(net_buffer, BUFFER_SIZE * 0, BUFFER_SIZE);
@@ -384,7 +388,7 @@ main :: () {
                     coin_spawner.n_live_ones -= 1;
                 }
             }
-        } else {
+        } else if last_received.ready {
             score_board = last_received.score_board;
         }
 
@@ -1421,9 +1425,22 @@ mem_dump_to_builder :: (builder: *String_Builder, data: [] u8) {
     }
 }
 
+concat :: ($args: .. string) -> string #expand {
+    return #run -> string {
+        sb: String_Builder;
+        for args append(*sb, it);
+        return builder_to_string(*sb);
+    };
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+// log debug {{{
+//
+
 code_to_string :: (code: Code) -> string {
     #import "Program_Print";
     #import "Compiler";
+    #import "Basic";
     root := compiler_get_nodes(code);
     builder : String_Builder;
     builder.allocator = temporary_allocator;
@@ -1436,20 +1453,20 @@ dbg_to_builder :: (builder: *String_Builder, code: Code) #expand {
 }
 
 log_dbg :: (code: Code) #expand {
-    log("% = %\n", loc, #run code_to_string(code), #insert code);
+    log("% = %\n", #run code_to_string(code), #insert code);
 }
 
 dbg :: (code: Code) #expand {
     print("% = %\n", #run code_to_string(code), #insert code);
 }
 
-concat :: ($args: .. string) #expand {
-    return #run -> string {
-        sb: String_Builder;
-        for args append(*sb, it);
-        return builder_to_string(*sb);
-    };
-}
+//
+// }}} log debug
+//
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+// pretty assert
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Constant structs don't work with compile time constructs yet, so we return
 // all fields directly
@@ -1529,6 +1546,8 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
     context.handling_assertion_failure = false;
 
 } @NoProfile
+
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 #import "Basic";
 #import "Math";
