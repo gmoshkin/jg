@@ -24,6 +24,14 @@ main :: () {
         }
     }
 
+    context.logger = (message: string, data: *void, info: Log_Info) {
+        if !message return;
+        using info.location;
+        print("[%:%:%] %\n",
+            fully_pathed_filename, line_number, character_number,
+            message);
+    };
+
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Init connection
     // TODO: move connection initialization into the game loop in a non blocking
@@ -69,23 +77,9 @@ main :: () {
             exit(1);
         }
 
-        conn_sock = socket(server_addr.ai_family, server_addr.ai_socktype, server_addr.ai_protocol);
-        if conn_sock == INVALID_SOCKET {
-            log_error("Failed creating a socket: %", get_error_string(get_last_socket_error()));
-            exit(1);
-        }
-
-        if !set_blocking(conn_sock, blocking = false) {
-            log_error("Failed setting socket to non blocking mode: %", get_error_string(get_last_socket_error()));
-            exit(1);
-        }
+        if !reinit_socket() exit(1);
 
         log("connecting to the server at %:%", server_address, port);
-        // rc = connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
-        // if rc {
-        //     log_error("`connect` failed: %", get_error_string(get_last_socket_error()));
-        //     exit(1);
-        // }
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -784,6 +778,9 @@ networking :: (deadline: f64) {
                 connecting = false;
             }
         } else /* am_client */ {
+            if conn_sock == INVALID_SOCKET {
+                if !reinit_socket() return;
+            }
             rc := connect(conn_sock, server_addr.ai_addr, xx server_addr.ai_addrlen);
             if rc {
                 err := get_last_socket_error();
@@ -819,6 +816,17 @@ networking :: (deadline: f64) {
 
             net_buf_out.back.pending.count = 0;
             net_buf_in.front.pending.count = 0;
+
+            #if OS == .WINDOWS {
+                rc := closesocket(conn_sock);
+                if rc < 0 {
+                    err := get_last_socket_error();
+                    log_error("Failed closing connection: #% %", err, get_error_string(err));
+                }
+                conn_sock = INVALID_SOCKET;
+            } else {
+                log_error("\e[31mNOT IMPLEMENTED: reconnection is not implemented on linux\e[0m");
+            }
         }
     }
 
@@ -842,13 +850,13 @@ networking :: (deadline: f64) {
             n_bytes_sent, _disconnected := send_slice(net_buf_out.back.pending);
             disconnected |= _disconnected;
 
-            if n_bytes_sent {
-                Setup_Mem_Dump_Printer();
-                log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
-                log("sent packet:");
-                log("%", cast(Mem_Dump) array_view(net_buf_out.back.pending, 0, n_bytes_sent));
-                log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
-            }
+            // if n_bytes_sent {
+            //     Setup_Mem_Dump_Printer();
+            //     log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+            //     log("sent packet:");
+            //     log("%", cast(Mem_Dump) array_view(net_buf_out.back.pending, 0, n_bytes_sent));
+            //     log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+            // }
 
             if !n_bytes_sent break;
             advance(*net_buf_out.back.pending, n_bytes_sent);
@@ -872,13 +880,14 @@ networking :: (deadline: f64) {
             disconnected |= _disconnected;
 
             received_slice := array_view(back.capacity, 0, n_bytes_received);
-            if received_slice {
-                Setup_Mem_Dump_Printer();
-                log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-                log("received data:");
-                log("%", cast(Mem_Dump) received_slice);
-                log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-            }
+
+            // if received_slice {
+            //     Setup_Mem_Dump_Printer();
+            //     log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+            //     log("received data:");
+            //     log("%", cast(Mem_Dump) received_slice);
+            //     log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+            // }
 
             if !received_slice break;
 
@@ -888,10 +897,10 @@ networking :: (deadline: f64) {
             if received_slice.count != back.capacity.count then should_be_receiving_packets = false;
 
             while received_slice {
-                log_dbg(front.pending.count);
+                // log_dbg(front.pending.count);
 
                 packet_size := read_packet_header(front.pending);
-                log_dbg(packet_size);
+                // log_dbg(packet_size);
                 size_to_copy_wanted := 0;
                 ifx packet_size < 0 // Not enough data in pending.
                     size_to_copy_wanted = size_of(Packet_Header) - front.pending.count;
@@ -917,50 +926,49 @@ networking :: (deadline: f64) {
     }
 }
 
+reinit_socket :: () -> ok: bool {
+    conn_sock = socket(server_addr.ai_family, server_addr.ai_socktype, server_addr.ai_protocol);
+    if conn_sock == INVALID_SOCKET {
+        log_error("Failed creating a socket: %", get_error_string(get_last_socket_error()));
+        return false;
+    }
+
+    if !set_blocking(conn_sock, blocking = false) {
+        log_error("Failed setting socket to non blocking mode: %", get_error_string(get_last_socket_error()));
+        return false;
+    }
+    return true;
+}
+
 sync : s32 = 0;
 last_time_received_something : f64 = -1;
 
 send_slice :: (slice: [] u8) -> n_bytes_sent: s64, need_reconnect : bool {
     rc := send(conn_sock, slice.data, xx slice.count, 0);
+    Handle_Error(rc, "sending to socket");
+    return rc, false;
+}
+
+receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
+    rc := recv(conn_sock, slice.data, xx slice.count, 0);
+    Handle_Error(rc, "receiving from socket");
+    return rc, false;
+}
+
+Handle_Error :: (rc: s32, when: string) #expand {
     if rc < 0 {
         need_reconnect := false;
         err := get_last_socket_error();
         if err != SOCKET_WOULDBLOCK  {
-            log_error("Failed sending to socket: #% %", err, get_error_string(err));
+            log_error("Failed %: #% %", when, err, get_error_string(err));
             #if OS == .WINDOWS {
                 need_reconnect = (err == WSAECONNRESET);
             } else {
                 // TODO: always need_reconnect = true??
             }
         }
-        return 0, need_reconnect;
+        `return 0, need_reconnect;
     }
-
-    return rc, false;
-}
-
-// FIXME: copypaste
-receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
-    rc := recv(conn_sock, slice.data, xx slice.count, 0);
-
-    Handle_Error :: (rc: s32) #expand {
-        if rc < 0 {
-            need_reconnect := false;
-            err := get_last_socket_error();
-            if err != SOCKET_WOULDBLOCK  {
-                log_error("Failed receiving from socket: #% %", err, get_error_string(err));
-                #if OS == .WINDOWS {
-                    need_reconnect = (err == WSAECONNRESET);
-                } else {
-                    // TODO: always need_reconnect = true??
-                }
-            }
-            `return 0, need_reconnect;
-        }
-    }
-    Handle_Error(rc);
-
-    return rc, false;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1415,11 +1423,19 @@ dbg_to_builder :: (builder: *String_Builder, code: Code) #expand {
 }
 
 log_dbg :: (code: Code) #expand {
-    log("% = %\n", #run code_to_string(code), #insert code);
+    log("% = %\n", loc, #run code_to_string(code), #insert code);
 }
 
 dbg :: (code: Code) #expand {
     print("% = %\n", #run code_to_string(code), #insert code);
+}
+
+concat :: ($args: .. string) #expand {
+    return #run -> string {
+        sb: String_Builder;
+        for args append(*sb, it);
+        return builder_to_string(*sb);
+    };
 }
 
 // Constant structs don't work with compile time constructs yet, so we return
