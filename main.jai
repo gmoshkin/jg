@@ -964,7 +964,7 @@ receive_slice :: (slice: [] u8) -> n_bytes_received: s64, need_reconnect: bool {
     return rc, false;
 }
 
-Handle_Error :: (rc: s32, when: string) #expand {
+Handle_Error :: (rc: s64, when: string) #expand {
     if rc < 0 {
         need_reconnect := false;
         err := get_last_socket_error();
