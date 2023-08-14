@@ -795,16 +795,14 @@ networking :: (deadline: f64) {
                 err := get_last_socket_error();
                 if err != SOCKET_WOULDBLOCK {
                     ignore := false;
-                    #if OS == .WINDOWS {
-                        // XXX: am I doing something wrong, or why would we get here?
-                        if err == WSAEISCONN   connecting = false;
-                        if err == WSAEALREADY  ignore = true;
-                    }
+                    if err == EISCONN  connecting = false;
+                    if err == EALREADY || err == EINPROGRESS  ignore = true;
                     if connecting && !ignore  log_error("`connect` failed: #% %", err, get_error_string(err));
                 }
             } else {
                 connecting = false;
             }
+            if !connecting log("connected to server");
         }
     }
 
@@ -826,16 +824,7 @@ networking :: (deadline: f64) {
             net_buf_out.back.pending.count = 0;
             net_buf_in.front.pending.count = 0;
 
-            #if OS == .WINDOWS {
-                rc := closesocket(conn_sock);
-                if rc < 0 {
-                    err := get_last_socket_error();
-                    log_error("Failed closing connection: #% %", err, get_error_string(err));
-                }
-                conn_sock = INVALID_SOCKET;
-            } else {
-                log_error("\e[31mNOT IMPLEMENTED: reconnection is not implemented on linux\e[0m");
-            }
+            close_and_reset(*conn_sock);
         }
     }
 
@@ -970,14 +959,19 @@ Handle_Error :: (rc: s64, when: string) #expand {
         err := get_last_socket_error();
         if err != SOCKET_WOULDBLOCK  {
             log_error("Failed %: #% %", when, err, get_error_string(err));
-            #if OS == .WINDOWS {
-                need_reconnect = (err == WSAECONNRESET);
-            } else {
-                // TODO: always need_reconnect = true??
-            }
+            need_reconnect = (err == ECONNRESET);
         }
         `return 0, need_reconnect;
     }
+}
+
+#if OS == .WINDOWS {
+    ECONNRESET :: WSAECONNRESET;
+    EISCONN :: WSAEISCONN;
+    EALREADY :: WSAEALREADY;
+    EINPROGRESS :: WSAEINPROGRESS;
+} else {
+    #import "POSIX";
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1388,6 +1382,16 @@ do_debug_break :: () {
     debug_break();
 }
 
+//
+// Mem_Dump {{{
+//
+
+Setup_Mem_Dump_Printer :: () #expand {
+    old_struct_printer := context.print_style.struct_printer;
+    `defer context.print_style.struct_printer = old_struct_printer;
+    context.print_style.struct_printer = mem_dump_printer;
+}
+
 Mem_Dump :: #type,distinct [] u8;
 mem_dump_printer :: (builder: *String_Builder, any: Any, data: *void) -> handled: bool {
     if any.type != type_info(Mem_Dump) return false;
@@ -1395,12 +1399,6 @@ mem_dump_printer :: (builder: *String_Builder, any: Any, data: *void) -> handled
     data := << cast(*[] u8) any.value_pointer;
     mem_dump_to_builder(builder, data);
     return true;
-}
-
-Setup_Mem_Dump_Printer :: () #expand {
-    old_struct_printer := context.print_style.struct_printer;
-    `defer context.print_style.struct_printer = old_struct_printer;
-    context.print_style.struct_printer = mem_dump_printer;
 }
 
 mem_dump_to_builder :: (builder: *String_Builder, data: [] u8) {
@@ -1424,6 +1422,10 @@ mem_dump_to_builder :: (builder: *String_Builder, data: [] u8) {
             append(builder, " ");
     }
 }
+
+//
+// }}} Mem_Dump
+//
 
 concat :: ($args: .. string) -> string #expand {
     return #run -> string {
@@ -1548,6 +1550,26 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 } @NoProfile
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
+
+is_specialization_of :: (specific: Type, generic: Type) -> bool {
+	ti_specific := cast(*Type_Info) specific;
+	ti_generic := cast(*Type_Info) generic;
+	if ti_specific.type != ti_generic.type || ti_specific.type != .STRUCT return false;
+
+	tis_specific := cast(*Type_Info_Struct) specific;
+	if tis_specific.polymorph_source_struct != xx generic return false;
+
+	return true;
+}
+
+// #run {
+//     set_build_options_dc(.{ do_output = false });
+
+//     code :: #code Packet_Header;
+//     code_sync :: #code,scope(Packet_Header) packet_size;
+//     log_dbg(code_sync);
+//     log_dbg(code);
+// }
 
 #import "Basic";
 #import "Math";
